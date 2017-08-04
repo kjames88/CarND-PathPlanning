@@ -5,12 +5,14 @@
 #include <iostream>
 #include <thread>
 #include <vector>
+#include <map>
 #include <time.h>
 #include <assert.h>
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "Eigen-3.3/Eigen/LU"
 #include "json.hpp"
+#include "vehicle.h"
 #include "spline.h"
 
 using namespace std;
@@ -273,10 +275,12 @@ int main() {
     }
   }
 
+  std::map<int, Vehicle> vehicles;
   std::vector<double> prev_x_vals;
   std::vector<double> prev_poly;
+  int car_lane = 0;
   int msg_cnt = 0;
-  h.onMessage([&msg_cnt, &prev_x_vals, &prev_poly,
+  h.onMessage([&vehicles, &car_lane, &msg_cnt, &prev_x_vals, &prev_poly,
                &sx, &sy, &sdx, &sdy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                                      uWS::OpCode opCode) {
                 // "42" at the start of the message means there's a websocket message event.
@@ -314,9 +318,59 @@ int main() {
                       // std::cout << "car_speed=" << car_speed << std::endl;
 
                       // Sensor Fusion Data, a list of all other cars on the same side of the road.
+                      //  Format:  [id,x,y,vx,vy,s,d]
                       auto sensor_fusion = j[1]["sensor_fusion"];
 
-                      std::cout << "sensor_fusion: " << sensor_fusion << std::endl;
+                      //std::cout << "sensor_fusion: " << sensor_fusion << std::endl;
+                      for (int i=0; i<sensor_fusion.size(); i++) {
+                        int id = sensor_fusion[i][0];
+                        double obstacle_d = sensor_fusion[i][6];
+                        int lane = obstacle_d / 4.0;
+                        double obstacle_s = sensor_fusion[i][5];
+                        double obstacle_vx = sensor_fusion[i][3];
+                        double obstacle_vy = sensor_fusion[i][4];
+                        double obstacle_v = sqrt(pow(obstacle_vx,2) + pow(obstacle_vy,2));
+                        auto it = vehicles.find(id);
+                        if (it == vehicles.end()) {
+                          Vehicle v(id, lane, obstacle_s, obstacle_v);
+                          it = vehicles.insert(std::pair<int, Vehicle> (id, v)).first;
+                        } else {
+                          it->second.set_lane(lane);
+                          it->second.set_s(obstacle_s);
+                          it->second.set_velocity(obstacle_v);
+                        }
+                      }
+
+                      // check for a car in front of me to follow
+                      //   find any vehicle in my lane (assume obstacle vehicles don't drive on the lines)
+                      //   sort by closest distance
+                      double T = 3.0;
+                      double maximum_speed = mph_to_mps(49.0);
+                      bool have_target_vehicle = false;
+                      int target_vehicle = -1;
+                      double min_dist = 1e6;
+                      double min_velocity = 0.0;
+                      int min_id = -1;
+                      for (auto it=vehicles.begin(); it!=vehicles.end(); it++) {
+                        if (it->second.get_lane() == car_lane) {
+                          double dist = it->second.get_s() - car_s;
+                          if (dist >= 0 && dist < min_dist) {
+                            min_dist = dist;
+                            min_id = it->first;
+                            min_velocity = it->second.get_velocity();
+                          }
+                        }
+                      }
+                      // don't react to a leader vehicle until distance is within the planning window at
+                      // the difference between our max speed and the leader's speed
+                      if (min_id >= 0 && min_dist < (T * (maximum_speed - min_velocity))) {
+                        auto it = vehicles.find(min_id);
+                        assert (it != vehicles.end());
+                        std::cout << "LEADER id " << min_id << " distance " << min_dist << "m velocity "
+                                  << it->second.get_velocity() << "m/s" << std::endl;
+                        target_vehicle = min_id;
+                        have_target_vehicle = true;
+                      }
                       
                       json msgJson;
 
@@ -353,24 +407,14 @@ int main() {
                         }
                       } else {
                         copy_path_cnt = 0;
+                        car_lane = car_d / 4.0;  // start out in the lane set by the simulator init
                       }
 
-                      bool have_target_vehicle = false;
-                      double T = 3.0;
-                      double target_speed = mph_to_mps(50.0);
                       double si = car_s;
                       double si_dot = car_v;
                       double si_dot_dot = car_a;
 
-                      double s_lv = 0.0;
-                      double a_lv = 0.0;         // lead vehicle acceleration                      
-                      double sf = car_s + (si_dot * T) + (0.5 * a_lv * pow(T,2));
-                      // if speed is not violated, set sf to s_lv - velocity dependent buffer
-                      double sf_dot = target_speed;
-                      double sf_dot_dot = a_lv;
-
-                      // std::cout << "si=" << si << ", si_dot=" << si_dot << ", si_dot_dot=" << si_dot_dot << std::endl;
-                      // std::cout << "sf=" << sf << ", sf_dot=" << sf_dot << ", sf_dot_dot=" << sf_dot_dot << std::endl;
+                      std::cout << "si=" << si << ", si_dot=" << si_dot << ", si_dot_dot=" << si_dot_dot << std::endl;
                         
                       assert(car_speed < 75.0);
 
@@ -379,15 +423,27 @@ int main() {
 
                       std::vector<double> poly;
                       if (have_target_vehicle) {
-                      
+                        double target_speed = vehicles[target_vehicle].get_velocity();
+                        double s_lv = vehicles[target_vehicle].get_s();             // lead vehicle initial s
+                        double v_lv = vehicles[target_vehicle].get_velocity();      // lead vehicle velocity
+                        double a_lv = vehicles[target_vehicle].get_acceleration();  // lead vehicle acceleration
+                        double sf_lv = s_lv + (v_lv * T) + (0.5 * a_lv * pow(T,2));
+                        double sf_max = sf_lv - 15.0;  // don't get closer than 15m (could be made speed dependent)
+                        //double sf = car_s + (si_dot * T) + (0.5 * si_dot_dot * pow(T,2));  // initial position update
+                        double sf = sf_max;
+                        double sf_dot = target_speed;
+                        double sf_dot_dot = a_lv;
+
+                        std::cout << "s_lv=" << s_lv << " sf=" << sf << ", sf_dot=" << sf_dot << ", sf_dot_dot=" << sf_dot_dot << std::endl;
+                        
                         Eigen::MatrixXf m(3,3);
                         m << pow(T,3), pow(T,4), pow(T,5),
                           3.0 * pow(T,2), 4.0 * pow(T,3), 5.0 * pow(T,4),
                           6.0 * T, 12.0 * pow(T,2), 20.0 * pow(T,3);
                         Eigen::MatrixXf m_inv = m.inverse();
                         Eigen::Vector3f v;
-                        v << (sf - (si + si_dot * T + 0.5 * si_dot_dot * pow(T,2))),
-                          (sf_dot - (si_dot + si_dot_dot * T)),
+                        v << (sf - (si + (si_dot * T) + (0.5 * si_dot_dot * pow(T,2)))),
+                          (sf_dot - (si_dot + (si_dot_dot * T))),
                           (sf_dot_dot - si_dot_dot);
                         Eigen::Vector3f soln = m_inv * v;
                         poly.push_back(si);
@@ -399,8 +455,10 @@ int main() {
                       
                       } else {
                         // quadric 2 eqn with no target sf
-                        
+                        double target_speed = maximum_speed;
                         double delta_s_dot = 0.0;  // trajectory search space
+                        double sf_dot = target_speed;
+                        double sf_dot_dot = 0.0;
                         sf_dot += delta_s_dot;
                         
                         Eigen::MatrixXf m(2,2);
@@ -419,27 +477,32 @@ int main() {
                         poly.push_back(0.0);  // use the quintic solver with alpha_5 = 0.0                        
                       }
                       prev_poly = poly;
+
+                      // std::cout << "poly: " << poly[0] << "," << poly[1] << "," << poly[2] << "," << poly[3]
+                      //           << "," << poly[4] << "," << poly[5] << std::endl;
                       
                       double x, y;
                       // keep the path size to 100 (5 copied + 95 new)
                       for (int step=0; step < 100 - copy_path_cnt; step++) {
                         auto qsoln = solve_quintic(poly, step * 0.02);
                         double s = qsoln[0];
-                        double d = 6.0;  // FIXME
+                        double d = (4.0 * (double) car_lane) + 2.0;  // FIXME
                         auto dbl_vec = getXY(s, d, sx, sy, sdx, sdy);
                         x = dbl_vec[0];
                         y = dbl_vec[1];
                         x_vals_raw.push_back(x);
                         y_vals_raw.push_back(y);
-                        //cout << " s[" << step << "] = " << s;
+                        if (step < 5) {
+                          cout << " s,v,a={" << s << "," << qsoln[1] << "," << qsoln[2] << "}  ";
+                        }
                       }
+                      std::cout << std::endl;
                       prev_x_vals = x_vals_raw;
-                      std::cout << std::endl;
-                      std::cout << "next_xy: ";
-                      for (int i=0; i<x_vals_raw.size(); i++) {
-                         std::cout << "(" << x_vals_raw[i] << "," << y_vals_raw[i] << ") ";
-                      }
-                      std::cout << std::endl;
+                      // std::cout << "next_xy: ";
+                      // for (int i=0; i<x_vals_raw.size(); i++) {
+                      //    std::cout << "(" << x_vals_raw[i] << "," << y_vals_raw[i] << ") ";
+                      // }
+                      // std::cout << std::endl;
 
                       // // fit a spline to the raw x,y vals
                       // tk::spline sxy;
