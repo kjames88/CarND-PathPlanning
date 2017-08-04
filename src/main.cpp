@@ -310,16 +310,20 @@ int main() {
                       double end_path_s = j[1]["end_path_s"];
                       double end_path_d = j[1]["end_path_d"];
 
-                      std::cout << "car_s=" << car_s << ", car_d=" << car_d << ", car_x=" << car_x << ", car_y=" << car_y << std::endl;
-                      std::cout << "car_speed=" << car_speed << std::endl;
+                      // std::cout << "car_s=" << car_s << ", car_d=" << car_d << ", car_x=" << car_x << ", car_y=" << car_y << std::endl;
+                      // std::cout << "car_speed=" << car_speed << std::endl;
 
                       // Sensor Fusion Data, a list of all other cars on the same side of the road.
                       auto sensor_fusion = j[1]["sensor_fusion"];
 
+                      std::cout << "sensor_fusion: " << sensor_fusion << std::endl;
+                      
                       json msgJson;
 
                       vector<double> next_x_vals;
                       vector<double> next_y_vals;
+                      vector<double> x_vals_raw;
+                      vector<double> y_vals_raw;
                       int copy_path_cnt = 5;
                       double car_v = mph_to_mps(car_speed);
                       double car_a = 0.0;
@@ -333,8 +337,8 @@ int main() {
                         // stich in the beginning of the previous path and then project from there for continuity
                         int prev=0;
                         while (prev < copy_path_cnt && prev < previous_path_x.size() && previous_path_x[prev] != NULL) {
-                          next_x_vals.push_back(previous_path_x[prev]);
-                          next_y_vals.push_back(previous_path_y[prev]);
+                          x_vals_raw.push_back(previous_path_x[prev]);
+                          y_vals_raw.push_back(previous_path_y[prev]);
                           prev++;
                         }
                         if (prev > 0) {
@@ -345,7 +349,7 @@ int main() {
                           car_s = qsoln[0];
                           car_v = qsoln[1];
                           car_a = qsoln[2];
-                          std::cout << "start_s=" << car_s << " v=" << car_v << " a=" << car_a << std::endl;
+                          // std::cout << "start_s=" << car_s << " v=" << car_v << " a=" << car_a << std::endl;
                         }
                       } else {
                         copy_path_cnt = 0;
@@ -417,26 +421,37 @@ int main() {
                       prev_poly = poly;
                       
                       double x, y;
-                      // keep the path size to 100 (10 copied + 90 new)
+                      // keep the path size to 100 (5 copied + 95 new)
                       for (int step=0; step < 100 - copy_path_cnt; step++) {
                         auto qsoln = solve_quintic(poly, step * 0.02);
                         double s = qsoln[0];
-                        double d = car_d;  // FIXME
+                        double d = 6.0;  // FIXME
                         auto dbl_vec = getXY(s, d, sx, sy, sdx, sdy);
                         x = dbl_vec[0];
                         y = dbl_vec[1];
-                        next_x_vals.push_back(x);
-                        next_y_vals.push_back(y);
+                        x_vals_raw.push_back(x);
+                        y_vals_raw.push_back(y);
                         //cout << " s[" << step << "] = " << s;
                       }
-                      prev_x_vals = next_x_vals;
-                      // std::cout << std::endl;
-                      // std::cout << "next_xy: ";
-                      // for (int i=0; i<next_x_vals.size(); i++) {
-                      //    std::cout << "(" << next_x_vals[i] << "," << next_y_vals[i] << ") ";
-                      // }
-                      // std::cout << std::endl;
+                      prev_x_vals = x_vals_raw;
+                      std::cout << std::endl;
+                      std::cout << "next_xy: ";
+                      for (int i=0; i<x_vals_raw.size(); i++) {
+                         std::cout << "(" << x_vals_raw[i] << "," << y_vals_raw[i] << ") ";
+                      }
+                      std::cout << std::endl;
 
+                      // // fit a spline to the raw x,y vals
+                      // tk::spline sxy;
+                      // sxy.set_points(x_vals_raw, y_vals_raw);
+                      // for (int i=1; i<x_vals_raw.size(); i++) {
+                      //   double x = (x_vals_raw[i] + x_vals_raw[i-1]) / 2.0;
+                      //   next_x_vals.push_back(x);
+                      //   next_y_vals.push_back(sxy(x));
+                      // }
+                      next_x_vals = x_vals_raw;
+                      next_y_vals = y_vals_raw;
+                      
                       msgJson["next_x"] = next_x_vals;
                       msgJson["next_y"] = next_y_vals;
 
