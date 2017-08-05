@@ -320,9 +320,6 @@ int main() {
                       double end_path_s = j[1]["end_path_s"];
                       double end_path_d = j[1]["end_path_d"];
 
-                      // std::cout << "car_s=" << car_s << ", car_d=" << car_d << ", car_x=" << car_x << ", car_y=" << car_y << std::endl;
-                      // std::cout << "car_speed=" << car_speed << std::endl;
-
                       // Sensor Fusion Data, a list of all other cars on the same side of the road.
                       //  Format:  [id,x,y,vx,vy,s,d]
                       auto sensor_fusion = j[1]["sensor_fusion"];
@@ -351,7 +348,7 @@ int main() {
                       //   find any vehicle in my lane (assume obstacle vehicles don't drive on the lines)
                       //   sort by closest distance
                       double T = 3.0;
-                      double maximum_speed = mph_to_mps(49.0);
+                      double maximum_speed = mph_to_mps(48.0);
                       double car_v = mph_to_mps(car_speed);
                       double car_a = 0.0;
                       double car_vd = 0.0;
@@ -375,15 +372,24 @@ int main() {
                             }
                           }
                         }
-                        // don't react to a leader vehicle until distance is within the planning window at
-                        // the difference between our max speed and the leader's speed
-                        if (min_id >= 0 && min_dist < (T * (maximum_speed - min_velocity))) {
+                        // // don't react to a leader vehicle until distance is within the planning window at
+                        // // the difference between our max speed and the leader's speed
+                        // if (min_id >= 0 && min_dist < (T * (maximum_speed - min_velocity))) {
+
+                        if (min_id >= 0 && min_dist < 50.0) {
                           auto it = vehicles.find(min_id);
                           assert (it != vehicles.end());
                           std::cout << "LEADER id " << min_id << " distance " << min_dist << "m velocity "
                                     << it->second.get_velocity() << "m/s" << std::endl;
                           target_vehicle = min_id;
-                          have_target_vehicle = true;
+                          double s_lv = vehicles[target_vehicle].get_s();             // lead vehicle initial s
+                          double v_lv = vehicles[target_vehicle].get_velocity();      // lead vehicle velocity
+                          double a_lv = vehicles[target_vehicle].get_acceleration();  // lead vehicle acceleration
+                          double sf_lv = s_lv + (v_lv * T) + (0.5 * a_lv * pow(T,2));
+                          double sf_max = sf_lv - 15.0;  // don't get closer than 15m (could be made speed dependent)
+                          if (car_s + (car_v * T) >= sf_max) {
+                            have_target_vehicle = true;
+                          }
                         }
                       } else {
                         // keep the parameters established when we decided to change lanes
@@ -505,7 +511,7 @@ int main() {
                       double sf, sf_dot, sf_dot_dot;                          
                       bool use_quintic = true;
                       if (lane_change_state) {
-                        std::cout << "moving into lane " << lane_change_lane << std::endl;
+                        //std::cout << "moving into lane " << lane_change_lane << std::endl;
                         sf = si + (((si_dot + lane_change_speed) / 2.0) * T);
                         sf_dot = lane_change_speed;
                         sf_dot_dot = 0.0;
@@ -529,10 +535,25 @@ int main() {
                           double a_lv = vehicles[target_vehicle].get_acceleration();  // lead vehicle acceleration
                           double sf_lv = s_lv + (v_lv * T) + (0.5 * a_lv * pow(T,2));
                           double sf_max = sf_lv - 15.0;  // don't get closer than 15m (could be made speed dependent)
-                          //double sf = car_s + (si_dot * T) + (0.5 * si_dot_dot * pow(T,2));  // initial position update
+
+                          
+                          // // plan for the slower car before we get too close
+                          // //double delta_s = 5.0;  // give the solver a way to slow down
+                          // double fwd_projection = (si_dot * T) + (0.5 * si_dot_dot * pow(T,2));
+                          // sf = si + fwd_projection;
+                          // std::cout << "fwd=" << fwd_projection << " sf=" << sf << " sf_max=" << sf_max << std::endl;
+                          // assert (sf >= si);
+                          // if (sf > sf_max) {
+                          //   sf = sf_max;
+                          // }
+                          // double scaler = ((sf_max - sf) / 40.0);
+                          // double scaled_speed = (scaler >= 1.0) ? maximum_speed
+                          //   : (target_speed + (1.0 - scaler) * (maximum_speed - target_speed));
+                          // sf_dot = scaled_speed;
+
                           sf = sf_max;
                           sf_dot = target_speed;
-                          sf_dot_dot = a_lv;
+                          sf_dot_dot = 0.0;
                         } else {
                           // quadric 2 eqn with no target sf
                           use_quintic = false;
@@ -593,8 +614,8 @@ int main() {
                       prev_s_poly = s_poly;
 
                       double x, y;
-                      // keep the path size to 100 (5 copied + 95 new)
-                      for (int step=0; step < 100 - copy_path_cnt; step++) {
+                      // keep the path size to 75 (5 copied + 70 new)
+                      for (int step=0; step < 75 - copy_path_cnt; step++) {
                         auto s_soln = solve_quintic(s_poly, step * 0.02);
                         double s = s_soln[0];
                         auto d_soln = solve_quintic(d_poly, step * 0.02);
