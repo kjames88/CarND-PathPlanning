@@ -207,6 +207,63 @@ double mph_to_mps(double mph) {
   return mps;
 }
 
+// check the next 50 timesteps for the path for speed, acceleration, and jerk
+bool check_path(std::vector<double> s_poly, std::vector<double> d_poly,
+                tk::spline& sx, tk::spline& sy, tk::spline& sdx, tk::spline& sdy) {
+  bool fail = false;
+  double max_speed = mph_to_mps(50.0);
+  double max_acc = 10.0;
+  double max_jerk = 50.0;
+  double x_prev[3];
+  double y_prev[3];
+  double v_prev[2];
+  double a_prev;
+  for (int i=0; i<50; i++) {
+    double t = (double) i * 0.02;
+    auto s_soln = solve_quintic(s_poly, t);
+    auto d_soln = solve_quintic(d_poly, t);
+    double s = s_soln[0];
+    double d = d_soln[0];
+    auto dbl_vec = getXY(s, d, sx, sy, sdx, sdy);
+    double x = dbl_vec[0];
+    double y = dbl_vec[1];
+    for (int i=2; i>0; i--) {
+      x_prev[i] = x_prev[i-1];
+      y_prev[i] = y_prev[i-1];
+    }
+    x_prev[0] = x;
+    y_prev[0] = y;
+    if (i>0) {
+      // check speed
+      double v = sqrt(pow(x-x_prev[0],2) + pow(y-y_prev[0],2)) / 0.02;
+      if (v > max_speed) {
+        std::cout << "FAIL v=" << v << std::endl;
+        fail = true;
+      }
+      if (i>1) {
+        // check acceleration
+        double a = (v-v_prev[0]) / 0.02;
+        if (a > max_acc) {
+          std::cout << "FAIL a=" << a << std::endl;
+          fail = true;
+        }
+        if (i>2) {
+          // check jerk
+          double j = (a - a_prev) / 0.02;
+          if (j > max_jerk) {
+            std::cout << "FAIL j=" << j << std::endl;
+            fail = true;
+          }
+        }
+        a_prev = a;
+      }
+      v_prev[1] = v_prev[0];
+      v_prev[0] = v;
+    }
+  }
+  return fail;
+}
+
 int main() {
   uWS::Hub h;
 
@@ -284,7 +341,8 @@ int main() {
   int lane_change_lane = 0;
   double lane_change_speed = 0.0;
   int msg_cnt = 0;
-  h.onMessage([&vehicles, &car_lane,
+  bool bootstrap = false;
+  h.onMessage([&bootstrap, &vehicles, &car_lane,
                &lane_change_state, &lane_change_lane, &lane_change_speed,
                &msg_cnt, &prev_x_vals, &prev_s_poly, &prev_d_poly,
                &sx, &sy, &sdx, &sdy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
@@ -355,7 +413,7 @@ int main() {
                       double car_ad = 0.0;
                       bool have_target_vehicle = false;
                       int target_vehicle = -1;
-                      double target_speed = maximum_speed;
+                      double target_speed = bootstrap ? 15.0 : maximum_speed;
                       double min_dist = 1e6;
                       double min_velocity = 0.0;
                       int min_id = -1;
@@ -375,8 +433,8 @@ int main() {
                         if (min_id >= 0 && min_dist < 50.0) {
                           auto it = vehicles.find(min_id);
                           assert (it != vehicles.end());
-                          std::cout << "LEADER id " << min_id << " distance " << min_dist << "m velocity "
-                                    << it->second.get_velocity() << "m/s" << std::endl;
+                          // std::cout << "LEADER id " << min_id << " distance " << min_dist << "m velocity "
+                          //           << it->second.get_velocity() << "m/s" << std::endl;
                           target_vehicle = min_id;
                           
                           // FIXME unify duplicated code
@@ -402,26 +460,31 @@ int main() {
                           int veh_lane = it->second.get_lane();
                           if (veh_lane >= 0 && veh_lane < 3 && try_lane[veh_lane]) {
                             double s0 = it->second.get_s();
-                            double s1 = s0 + (T * it->second.get_velocity());
+                            double s1 = s0 + (T * it->second.get_velocity()) + (0.5 * it->second.get_acceleration() * pow(T,2));
                             // block the lane if a car is within buffer distance in front or behind
                             double dist = abs(car_s - s0);
                             bool ahead = (car_s > s0);
+                            double car_s1 = car_s + (car_v * T) + (0.5 * car_a * pow(T,2));
                             if ((ahead && (dist < 5.0)) || (!ahead && (dist < 10.0))) {
                               block_lane[veh_lane] = true;
-                              std::cout << "veh " << it->first << " s=" << s0 << " car_s=" << car_s <<
-                                " blocks lane " << veh_lane << " (1)" << std::endl;
+                              // std::cout << "veh " << it->first << " s=" << s0 << " car_s=" << car_s <<
+                              //   " blocks lane " << veh_lane << " (1)" << std::endl;
+                            } else if (!ahead && ((s1 - car_s1) < 20.0)) {
+                              block_lane[veh_lane] = true;
+                              // std::cout << "veh " << it->first << " s=" << s0 << "," << s1 << " car_s1=" << car_s1 <<
+                              //   " blocks lane " << veh_lane << " (1.5)" << std::endl;
                             } else {
                               // block the lane if a car will cross our position at velocity
                               //   - also ignore a lane with a slower car in front
                               if (s0 < car_s) {
-                                if (s1 > (car_s + (car_v * T))) {
+                                if (s1 > (car_s + (car_v * T) + (0.5 * car_a * pow(T,2)))) {
                                   block_lane[veh_lane] = true;
-                                  std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (2)" << std::endl;
+                                  // std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (2)" << std::endl;
                                 }
                               } else {
                                 if (dist < 50.0 && car_v > it->second.get_velocity()) {
                                   block_lane[veh_lane] = true;
-                                  std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (3)" << std::endl;
+                                  // std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (3)" << std::endl;
                                 } else {
                                   if (dist < 50.0) {
                                     lane_vmax[veh_lane] = it->second.get_velocity();
@@ -440,7 +503,7 @@ int main() {
                           }
                         }
                         if (max_lane >= 0) {
-                          std::cout << "we can move into lane " << max_lane << " v=" << max_v << std::endl;
+                          // std::cout << "we can move into lane " << max_lane << " v=" << max_v << std::endl;
                           lane_change_state = true;
                           lane_change_lane = max_lane;
                           lane_change_speed = max_v;
@@ -454,8 +517,9 @@ int main() {
                       vector<double> next_y_vals;
                       vector<double> x_vals_raw;
                       vector<double> y_vals_raw;
-                      int copy_path_cnt = 5;
+                      int copy_path_cnt = bootstrap ? 75 : 5;
                       if (car_v > 0) {
+
                         // determine the number of points popped
                         //   then we can use prior information for the start of the next segment
                         int popped = prev_x_vals.size() - previous_path_x.size();
@@ -483,6 +547,7 @@ int main() {
                           car_vd = d_soln[1];
                           car_ad = d_soln[2];
                         }
+                        
                       } else {
                         copy_path_cnt = 0;
                         car_lane = car_d / 4.0;  // start out in the lane set by the simulator init
@@ -494,10 +559,6 @@ int main() {
                       double di = car_d;
                       double di_dot = car_vd;
                       double di_dot_dot = car_ad;
-
-                      //std::cout << "si=" << si << ", si_dot=" << si_dot << ", si_dot_dot=" << si_dot_dot << std::endl;
-                        
-                      assert(car_speed < 75.0);
 
                       // Using the quintic polynomial solver from Trajectory Generation
                       //   Or a quadric alternative to get the car moving suggested in the Werling paper
@@ -534,6 +595,15 @@ int main() {
                           double a_lv = vehicles[target_vehicle].get_acceleration();  // lead vehicle acceleration
                           double sf_lv = s_lv + (v_lv * T) + (0.5 * a_lv * pow(T,2));
                           double sf_max = sf_lv - 15.0;  // don't get closer than 15m (could be made speed dependent)
+                          if (sf_max <= si) {
+                            std::cout << "TOO CLOSE: si=" << si << " si_dot=" << si_dot << " sf_max=" << sf_max << " veh=" <<
+                              target_vehicle << " s_lv=" << s_lv << " v_lv=" << v_lv << " a_lv=" << a_lv <<
+                              " sf_lv=" << sf_lv;
+                            while (si >= sf_max) {
+                              sf_max -= 1.0;
+                            }
+                            std::cout << " dropped sf_max to " << sf_max << std::endl;
+                          }
                           assert(sf_max > si);
                           sf = sf_max;
                           sf_dot = target_speed;
@@ -597,18 +667,24 @@ int main() {
                       }
                       prev_s_poly = s_poly;
 
-                      double x, y;
+                      check_path(s_poly, d_poly, sx, sy, sdx, sdy);
+                      
+                      int path_length = bootstrap ? 150 : 75;
                       // keep the path size to 75 (5 copied + 70 new)
-                      for (int step=0; step < 75 - copy_path_cnt; step++) {
+                      for (int step=0; step < path_length - copy_path_cnt; step++) {
                         auto s_soln = solve_quintic(s_poly, step * 0.02);
                         double s = s_soln[0];
                         auto d_soln = solve_quintic(d_poly, step * 0.02);
                         double d = d_soln[0];
                         auto dbl_vec = getXY(s, d, sx, sy, sdx, sdy);
-                        x = dbl_vec[0];
-                        y = dbl_vec[1];
+                        double x = dbl_vec[0];
+                        double y = dbl_vec[1];
                         x_vals_raw.push_back(x);
                         y_vals_raw.push_back(y);
+                      }
+                      if (bootstrap && car_v >= 5.0) {
+                        std::cout << "end bootstrap on msg_cnt " << msg_cnt << std::endl;
+                        bootstrap = false;
                       }
                       prev_x_vals = x_vals_raw;
                       next_x_vals = x_vals_raw;
@@ -618,10 +694,10 @@ int main() {
                       msgJson["next_y"] = next_y_vals;
 
                       auto msg = "42[\"control\","+ msgJson.dump()+"]";
-
+                      
                       //this_thread::sleep_for(chrono::milliseconds(1000));
                       ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
-                      
+
                       msg_cnt++;
                     }
                   } else {
