@@ -372,16 +372,15 @@ int main() {
                             }
                           }
                         }
-                        // // don't react to a leader vehicle until distance is within the planning window at
-                        // // the difference between our max speed and the leader's speed
-                        // if (min_id >= 0 && min_dist < (T * (maximum_speed - min_velocity))) {
-
                         if (min_id >= 0 && min_dist < 50.0) {
                           auto it = vehicles.find(min_id);
                           assert (it != vehicles.end());
                           std::cout << "LEADER id " << min_id << " distance " << min_dist << "m velocity "
                                     << it->second.get_velocity() << "m/s" << std::endl;
                           target_vehicle = min_id;
+                          
+                          // FIXME unify duplicated code
+                          
                           double s_lv = vehicles[target_vehicle].get_s();             // lead vehicle initial s
                           double v_lv = vehicles[target_vehicle].get_velocity();      // lead vehicle velocity
                           double a_lv = vehicles[target_vehicle].get_acceleration();  // lead vehicle acceleration
@@ -398,7 +397,7 @@ int main() {
                         // following someone slower:  see if we can drive faster by passing in a neighboring lane
                         bool try_lane[3] = {car_lane == 1, car_lane == 2 || car_lane == 0, car_lane == 1};
                         bool block_lane[3] = {false, false, false};
-                        double lane_vmax[3] = {0.0, 0.0, 0.0};
+                        double lane_vmax[3] = {maximum_speed, maximum_speed, maximum_speed};
                         for (auto it=vehicles.begin(); it!=vehicles.end(); it++) {
                           int veh_lane = it->second.get_lane();
                           if (veh_lane >= 0 && veh_lane < 3 && try_lane[veh_lane]) {
@@ -406,7 +405,8 @@ int main() {
                             double s1 = s0 + (T * it->second.get_velocity());
                             // block the lane if a car is within buffer distance in front or behind
                             double dist = abs(car_s - s0);
-                            if (dist < 5.0) {
+                            bool ahead = (car_s > s0);
+                            if ((ahead && (dist < 5.0)) || (!ahead && (dist < 10.0))) {
                               block_lane[veh_lane] = true;
                               std::cout << "veh " << it->first << " s=" << s0 << " car_s=" << car_s <<
                                 " blocks lane " << veh_lane << " (1)" << std::endl;
@@ -419,14 +419,13 @@ int main() {
                                   std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (2)" << std::endl;
                                 }
                               } else {
-                                if (dist < 25.0 && car_v > it->second.get_velocity()) {
+                                if (dist < 50.0 && car_v > it->second.get_velocity()) {
                                   block_lane[veh_lane] = true;
                                   std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (3)" << std::endl;
                                 } else {
-                                  if (dist < 50.0)
+                                  if (dist < 50.0) {
                                     lane_vmax[veh_lane] = it->second.get_velocity();
-                                  else
-                                    lane_vmax[veh_lane] = maximum_speed;
+                                  }
                                 }
                               }
                             }
@@ -535,22 +534,7 @@ int main() {
                           double a_lv = vehicles[target_vehicle].get_acceleration();  // lead vehicle acceleration
                           double sf_lv = s_lv + (v_lv * T) + (0.5 * a_lv * pow(T,2));
                           double sf_max = sf_lv - 15.0;  // don't get closer than 15m (could be made speed dependent)
-
-                          
-                          // // plan for the slower car before we get too close
-                          // //double delta_s = 5.0;  // give the solver a way to slow down
-                          // double fwd_projection = (si_dot * T) + (0.5 * si_dot_dot * pow(T,2));
-                          // sf = si + fwd_projection;
-                          // std::cout << "fwd=" << fwd_projection << " sf=" << sf << " sf_max=" << sf_max << std::endl;
-                          // assert (sf >= si);
-                          // if (sf > sf_max) {
-                          //   sf = sf_max;
-                          // }
-                          // double scaler = ((sf_max - sf) / 40.0);
-                          // double scaled_speed = (scaler >= 1.0) ? maximum_speed
-                          //   : (target_speed + (1.0 - scaler) * (maximum_speed - target_speed));
-                          // sf_dot = scaled_speed;
-
+                          assert(sf_max > si);
                           sf = sf_max;
                           sf_dot = target_speed;
                           sf_dot_dot = 0.0;
