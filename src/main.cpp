@@ -213,10 +213,10 @@ bool check_path(std::vector<double> s_poly, std::vector<double> d_poly,
   bool fail = false;
   double max_speed = mph_to_mps(50.0);
   double max_acc = 10.0;
-  double max_jerk = 50.0;
+  double max_jerk = 10.0;
   double x_prev[3];
   double y_prev[3];
-  double v_prev[2];
+  double v_prev;
   double a_prev;
   for (int i=0; i<50; i++) {
     double t = (double) i * 0.02;
@@ -227,41 +227,94 @@ bool check_path(std::vector<double> s_poly, std::vector<double> d_poly,
     auto dbl_vec = getXY(s, d, sx, sy, sdx, sdy);
     double x = dbl_vec[0];
     double y = dbl_vec[1];
-    for (int i=2; i>0; i--) {
-      x_prev[i] = x_prev[i-1];
-      y_prev[i] = y_prev[i-1];
+    for (int j=2; j>0; j--) {
+      x_prev[j] = x_prev[j-1];
+      y_prev[j] = y_prev[j-1];
     }
-    x_prev[0] = x;
-    y_prev[0] = y;
     if (i>0) {
       // check speed
       double v = sqrt(pow(x-x_prev[0],2) + pow(y-y_prev[0],2)) / 0.02;
       if (v > max_speed) {
-        std::cout << "FAIL v=" << v << std::endl;
+        std::cout << "FAIL v=" << v << " idx " << i << std::endl;
         fail = true;
+        return false;
       }
       if (i>1) {
         // check acceleration
-        double a = (v-v_prev[0]) / 0.02;
+        double a = (v-v_prev) / 0.02;
         if (a > max_acc) {
-          std::cout << "FAIL a=" << a << std::endl;
-          fail = true;
+          //std::cout << "FAIL a=" << a << std::endl;
+          //fail = true;
         }
         if (i>2) {
           // check jerk
           double j = (a - a_prev) / 0.02;
           if (j > max_jerk) {
-            std::cout << "FAIL j=" << j << std::endl;
-            fail = true;
+            //std::cout << "FAIL j=" << j << std::endl;
+            //fail = true;
           }
         }
         a_prev = a;
       }
-      v_prev[1] = v_prev[0];
-      v_prev[0] = v;
+      v_prev = v;
     }
+    x_prev[0] = x;
+    y_prev[0] = y;
   }
-  return fail;
+  return !fail;
+}
+
+// check the next 50 timesteps for the path for speed, acceleration, and jerk
+bool check_path(std::vector<double> next_x, std::vector<double> next_y) {
+  bool fail = false;
+  assert(next_x.size() > 0);
+  int steps = next_x.size() > 50 ? 50 : next_x.size();
+  double max_speed = mph_to_mps(50.0);
+  double max_acc = 10.0;
+  double max_jerk = 10.0;
+  double x_prev[3];
+  double y_prev[3];
+  double v_prev;
+  double a_prev;
+  for (int i=0; i<50; i++) {
+    double t = (double) i * 0.02;
+    double x = next_x[i];
+    double y = next_y[i];
+    for (int j=2; j>0; j--) {
+      x_prev[j] = x_prev[j-1];
+      y_prev[j] = y_prev[j-1];
+    }
+    if (i>0) {
+      // check speed
+      double v = sqrt(pow(x-x_prev[0],2) + pow(y-y_prev[0],2)) / 0.02;
+      if (v > max_speed) {
+        std::cout << "FAIL v=" << v << " idx " << i << std::endl;
+        fail = true;
+        return false;
+      }
+      if (i>1) {
+        // check acceleration
+        double a = (v-v_prev) / 0.02;
+        if (a > max_acc) {
+          //std::cout << "FAIL a=" << a << std::endl;
+          //fail = true;
+        }
+        if (i>2) {
+          // check jerk
+          double j = (a - a_prev) / 0.02;
+          if (j > max_jerk) {
+            //std::cout << "FAIL j=" << j << std::endl;
+            //fail = true;
+          }
+        }
+        a_prev = a;
+      }
+      v_prev = v;
+    }
+    x_prev[0] = x;
+    y_prev[0] = y;
+  }
+  return !fail;
 }
 
 int main() {
@@ -334,8 +387,8 @@ int main() {
 
   std::map<int, Vehicle> vehicles;
   std::vector<double> prev_x_vals;
-  std::vector<double> prev_s_poly;
-  std::vector<double> prev_d_poly;
+  std::vector<double> prev_s_vals;
+  std::vector<double> prev_d_vals;
   int car_lane = 0;
   bool lane_change_state = false;
   int lane_change_lane = 0;
@@ -344,7 +397,7 @@ int main() {
   bool bootstrap = false;
   h.onMessage([&bootstrap, &vehicles, &car_lane,
                &lane_change_state, &lane_change_lane, &lane_change_speed,
-               &msg_cnt, &prev_x_vals, &prev_s_poly, &prev_d_poly,
+               &msg_cnt, &prev_x_vals, &prev_s_vals, &prev_d_vals,
                &sx, &sy, &sdx, &sdy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                                      uWS::OpCode opCode) {
                 // "42" at the start of the message means there's a websocket message event.
@@ -413,7 +466,6 @@ int main() {
                       double car_ad = 0.0;
                       bool have_target_vehicle = false;
                       int target_vehicle = -1;
-                      double target_speed = bootstrap ? 15.0 : maximum_speed;
                       double min_dist = 1e6;
                       double min_velocity = 0.0;
                       int min_id = -1;
@@ -515,40 +567,56 @@ int main() {
 
                       vector<double> next_x_vals;
                       vector<double> next_y_vals;
-                      vector<double> x_vals_raw;
-                      vector<double> y_vals_raw;
-                      int copy_path_cnt = bootstrap ? 75 : 5;
+                      vector<double> next_s_vals;
+                      vector<double> next_d_vals;
+                      int copy_path_cnt = 5;
                       if (car_v > 0) {
 
                         // determine the number of points popped
                         //   then we can use prior information for the start of the next segment
                         int popped = prev_x_vals.size() - previous_path_x.size();
+                        assert(prev_x_vals.size() == prev_s_vals.size());
+                        assert(prev_x_vals.size() == prev_d_vals.size());
                         assert(popped > 0);
-                        int prev_end_step = popped; // copied points are NOT counted in the polynomial step
                       
-                        // stich in the beginning of the previous path and then project from there for continuity
+                        // stitch in the beginning of the previous path and then project from there for continuity
+                        double init_x = previous_path_x[0];
+                        double init_y = previous_path_y[0];
                         int prev=0;
-                        while (prev < copy_path_cnt && prev < previous_path_x.size() && previous_path_x[prev] != NULL) {
-                          x_vals_raw.push_back(previous_path_x[prev]);
-                          y_vals_raw.push_back(previous_path_y[prev]);
+                        //while (distance(init_x, init_y, previous_path_x[prev], previous_path_y[prev]) < 2.0
+                        while (prev < copy_path_cnt
+                               && prev < previous_path_x.size() && previous_path_x[prev] != NULL) {
+                          next_x_vals.push_back(previous_path_x[prev]);
+                          next_y_vals.push_back(previous_path_y[prev]);
                           prev++;
                         }
-                        if (prev > 0) {
-                          assert (prev == copy_path_cnt);
-                          // push only as many next points as we want to stich into the new path so the s,d values can be used
-                          //   - also keep the final v,a from the previous polynomial
-                          auto s_soln = solve_quintic(prev_s_poly, prev_end_step * 0.02);
-                          car_s = s_soln[0];
-                          car_v = s_soln[1];
-                          car_a = s_soln[2];
-
-                          auto d_soln = solve_quintic(prev_d_poly, prev_end_step * 0.02);
-                          car_d = d_soln[0];
-                          car_vd = d_soln[1];
-                          car_ad = d_soln[2];
+                        copy_path_cnt = prev;
+                        // keep copied s,d in prev vectors; sync'd with next_x_vals and next_y_vals
+                        for (int i=0; i<copy_path_cnt; i++) {
+                          next_s_vals.push_back(prev_s_vals[popped+i]);
+                          next_d_vals.push_back(prev_d_vals[popped+i]);
                         }
+                        assert(prev >= 3);
+
+                        if (prev > 0) {
+                          // push only as many next points as we want to stitch into the new path so the s,d values can be used
+                          //   - also keep the final v,a from the previous polynomial
+                          int idx_back = next_s_vals.size() - 1;
+                          car_s = next_s_vals[idx_back];
+                          car_v = (next_s_vals[idx_back] - next_s_vals[idx_back-1]) / 0.02;
+                          car_a = (car_v - ((next_s_vals[idx_back-1] - next_s_vals[idx_back-2]) / 0.02)) / 0.02;
+
+                          car_d = next_d_vals[idx_back];
+                          car_vd = (next_d_vals[idx_back] - next_d_vals[idx_back-1]) / 0.02;
+                          car_ad = (car_vd - ((next_d_vals[idx_back-1] - next_d_vals[idx_back-2]) / 0.02)) / 0.02;
+                        }                        
+                        // std::cout << "popped=" << popped << ", copy_path_cnt=" << copy_path_cnt << " plot from car_s=" << car_s
+                        //           << " car_v=" << car_v << " car_a=" << car_a << std::endl;                        
                         
                       } else {
+
+                        std::cout << "Car is stopped" << std::endl;
+                        
                         copy_path_cnt = 0;
                         car_lane = car_d / 4.0;  // start out in the lane set by the simulator init
                       }
@@ -560,135 +628,187 @@ int main() {
                       double di_dot = car_vd;
                       double di_dot_dot = car_ad;
 
-                      // Using the quintic polynomial solver from Trajectory Generation
-                      //   Or a quadric alternative to get the car moving suggested in the Werling paper
-
                       std::vector<double> s_poly;
                       std::vector<double> d_poly;
+                      vector<double> x_vals_raw;
+                      vector<double> y_vals_raw;
+                      vector<double> s_vals_raw;
+                      vector<double> d_vals_raw;
 
-                      // d component of trajectory
-                      double df, df_dot, df_dot_dot;
-                      double sf, sf_dot, sf_dot_dot;                          
-                      bool use_quintic = true;
-                      if (lane_change_state) {
-                        //std::cout << "moving into lane " << lane_change_lane << std::endl;
-                        sf = si + (((si_dot + lane_change_speed) / 2.0) * T);
-                        sf_dot = lane_change_speed;
-                        sf_dot_dot = 0.0;
-                        df = ((double) lane_change_lane * 4.0) + 2.0;
-                        df_dot = 0.0;
-                        df_dot_dot = 0.0;
+                      bool searching = true;
+                      int search_cnt = 0;
+                      while (searching) {
+                      
+                        // Using the quintic polynomial solver from Trajectory Generation
+                        //   Or a quadric alternative to get the car moving suggested in the Werling paper
 
-                        if (abs(df - di) < 0.1) {
-                          std::cout << "completed lane change" << std::endl;
-                          car_lane = lane_change_lane;
-                          lane_change_state = false;
-                        }
-                      } else {
-                        df = ((double) car_lane * 4.0) + 2.0;
-                        df_dot = 0.0;
-                        df_dot_dot = 0.0;
-                        if (have_target_vehicle) {
-                          target_speed = vehicles[target_vehicle].get_velocity();
-                          double s_lv = vehicles[target_vehicle].get_s();             // lead vehicle initial s
-                          double v_lv = vehicles[target_vehicle].get_velocity();      // lead vehicle velocity
-                          double a_lv = vehicles[target_vehicle].get_acceleration();  // lead vehicle acceleration
-                          double sf_lv = s_lv + (v_lv * T) + (0.5 * a_lv * pow(T,2));
-                          double sf_max = sf_lv - 15.0;  // don't get closer than 15m (could be made speed dependent)
-                          if (sf_max <= si) {
-                            std::cout << "TOO CLOSE: si=" << si << " si_dot=" << si_dot << " sf_max=" << sf_max << " veh=" <<
-                              target_vehicle << " s_lv=" << s_lv << " v_lv=" << v_lv << " a_lv=" << a_lv <<
-                              " sf_lv=" << sf_lv;
-                            while (si >= sf_max) {
-                              sf_max -= 1.0;
-                            }
-                            std::cout << " dropped sf_max to " << sf_max << std::endl;
-                          }
-                          assert(sf_max > si);
-                          sf = sf_max;
-                          sf_dot = target_speed;
+                        x_vals_raw.clear();
+                        y_vals_raw.clear();
+                        s_vals_raw.clear();
+                        d_vals_raw.clear();
+                        
+                        // d component of trajectory
+                        double df, df_dot, df_dot_dot;
+                        double sf, sf_dot, sf_dot_dot;                          
+                        bool use_quintic = true;
+                        if (lane_change_state) {
+                          //std::cout << "moving into lane " << lane_change_lane << std::endl;
+                          sf = si + (((si_dot + lane_change_speed) / 2.0) * T);
+                          sf_dot = lane_change_speed - (double) (search_cnt);
                           sf_dot_dot = 0.0;
+                          df = ((double) lane_change_lane * 4.0) + 2.0;
+                          df_dot = 0.0;
+                          df_dot_dot = 0.0;
+
+                          if (abs(df - di) < 0.1) {
+                            std::cout << "completed lane change" << std::endl;
+                            car_lane = lane_change_lane;
+                            lane_change_state = false;
+                          }
+                        } else {
+                          df = ((double) car_lane * 4.0) + 2.0;
+                          df_dot = 0.0;
+                          df_dot_dot = 0.0;
+                          if (have_target_vehicle) {
+                            double target_speed = vehicles[target_vehicle].get_velocity() - (double) search_cnt;
+                            double s_lv = vehicles[target_vehicle].get_s();             // lead vehicle initial s
+                            double v_lv = vehicles[target_vehicle].get_velocity();      // lead vehicle velocity
+                            double a_lv = vehicles[target_vehicle].get_acceleration();  // lead vehicle acceleration
+                            double sf_lv = s_lv + (v_lv * T) + (0.5 * a_lv * pow(T,2));
+                            double sf_max = sf_lv - 15.0;  // don't get closer than 15m (could be made speed dependent)
+                            if (sf_max <= si) {
+                              std::cout << "TOO CLOSE: si=" << si << " si_dot=" << si_dot << " sf_max=" << sf_max << " veh=" <<
+                                target_vehicle << " s_lv=" << s_lv << " v_lv=" << v_lv << " a_lv=" << a_lv <<
+                                " sf_lv=" << sf_lv;
+                              while (si >= sf_max) {
+                                sf_max += 1.0;
+                              }
+                              std::cout << " dropped sf_max to " << sf_max << std::endl;
+                            }
+                            assert(sf_max > si);
+                            sf = sf_max;
+                            sf_dot = target_speed;
+                            sf_dot_dot = 0.0;
+                          } else {
+                            // quadric 2 eqn with no target sf
+                            use_quintic = false;
+                            double delta_s_dot = -1.0 * (double) search_cnt;  // trajectory search space
+                            double target_speed = maximum_speed + delta_s_dot;
+                            target_speed = (target_speed > maximum_speed) ? maximum_speed : target_speed;
+                            sf_dot = target_speed;
+                            sf_dot += delta_s_dot;
+                            sf_dot_dot = 0.0;
+                          }
+                        }
+                        // quintic solution for d
+                        Eigen::MatrixXf m(3,3);
+                        m << pow(T,3), pow(T,4), pow(T,5),
+                          3.0 * pow(T,2), 4.0 * pow(T,3), 5.0 * pow(T,4),
+                          6.0 * T, 12.0 * pow(T,2), 20.0 * pow(T,3);
+                        Eigen::MatrixXf m_inv = m.inverse();
+                        Eigen::Vector3f v;
+                        v << (df - (di + (di_dot * T) + (0.5 * di_dot_dot * pow(T,2)))),
+                          (df_dot - (di_dot + (di_dot_dot * T))),
+                          (df_dot_dot - di_dot_dot);
+                        Eigen::Vector3f soln = m_inv * v;
+                        d_poly.push_back(di);
+                        d_poly.push_back(di_dot);
+                        d_poly.push_back(0.5 * di_dot_dot);
+                        d_poly.push_back(soln(0));
+                        d_poly.push_back(soln(1));
+                        d_poly.push_back(soln(2));
+                      
+                        if (use_quintic) {
+                          Eigen::Vector3f v;
+                          v << (sf - (si + (si_dot * T) + (0.5 * si_dot_dot * pow(T,2)))),
+                            (sf_dot - (si_dot + (si_dot_dot * T))),
+                            (sf_dot_dot - si_dot_dot);
+                          Eigen::Vector3f soln = m_inv * v;
+                          s_poly.push_back(si);
+                          s_poly.push_back(si_dot);
+                          s_poly.push_back(0.5 * si_dot_dot);
+                          s_poly.push_back(soln(0));
+                          s_poly.push_back(soln(1));
+                          s_poly.push_back(soln(2));
                         } else {
                           // quadric 2 eqn with no target sf
-                          use_quintic = false;
-                          double delta_s_dot = 0.0;  // trajectory search space
-                          sf_dot = target_speed;
-                          sf_dot += delta_s_dot;
-                          sf_dot_dot = 0.0;
+                          Eigen::MatrixXf m2(2,2);
+                          m2 << 3.0 * pow(T,2), 4.0 * pow(T,3),
+                            6.0 * T, 12.0 * pow(T,2);
+                          Eigen::MatrixXf m2_inv = m2.inverse();
+                          Eigen::Vector2f v2;
+                          v2 << sf_dot - (si_dot + si_dot_dot * T),
+                            sf_dot_dot - si_dot_dot;
+                          Eigen::Vector2f soln = m2_inv * v2;
+                          s_poly.push_back(si);
+                          s_poly.push_back(si_dot);
+                          s_poly.push_back(0.5 * si_dot_dot);
+                          s_poly.push_back(soln(0));
+                          s_poly.push_back(soln(1));
+                          s_poly.push_back(0.0);  // use the quintic solver with alpha_5 = 0.0                        
                         }
-                      }
-                      // quintic solution for d
-                      Eigen::MatrixXf m(3,3);
-                      m << pow(T,3), pow(T,4), pow(T,5),
-                        3.0 * pow(T,2), 4.0 * pow(T,3), 5.0 * pow(T,4),
-                        6.0 * T, 12.0 * pow(T,2), 20.0 * pow(T,3);
-                      Eigen::MatrixXf m_inv = m.inverse();
-                      Eigen::Vector3f v;
-                      v << (df - (di + (di_dot * T) + (0.5 * di_dot_dot * pow(T,2)))),
-                        (df_dot - (di_dot + (di_dot_dot * T))),
-                        (df_dot_dot - di_dot_dot);
-                      Eigen::Vector3f soln = m_inv * v;
-                      d_poly.push_back(di);
-                      d_poly.push_back(di_dot);
-                      d_poly.push_back(0.5 * di_dot_dot);
-                      d_poly.push_back(soln(0));
-                      d_poly.push_back(soln(1));
-                      d_poly.push_back(soln(2));
-                      prev_d_poly = d_poly;
-                      
-                      if (use_quintic) {
-                        Eigen::Vector3f v;
-                        v << (sf - (si + (si_dot * T) + (0.5 * si_dot_dot * pow(T,2)))),
-                          (sf_dot - (si_dot + (si_dot_dot * T))),
-                          (sf_dot_dot - si_dot_dot);
-                        Eigen::Vector3f soln = m_inv * v;
-                        s_poly.push_back(si);
-                        s_poly.push_back(si_dot);
-                        s_poly.push_back(0.5 * si_dot_dot);
-                        s_poly.push_back(soln(0));
-                        s_poly.push_back(soln(1));
-                        s_poly.push_back(soln(2));
-                      } else {
-                        // quadric 2 eqn with no target sf
-                        Eigen::MatrixXf m2(2,2);
-                        m2 << 3.0 * pow(T,2), 4.0 * pow(T,3),
-                          6.0 * T, 12.0 * pow(T,2);
-                        Eigen::MatrixXf m2_inv = m2.inverse();
-                        Eigen::Vector2f v2;
-                        v2 << sf_dot - (si_dot + si_dot_dot * T),
-                          sf_dot_dot - si_dot_dot;
-                        Eigen::Vector2f soln = m2_inv * v2;
-                        s_poly.push_back(si);
-                        s_poly.push_back(si_dot);
-                        s_poly.push_back(0.5 * si_dot_dot);
-                        s_poly.push_back(soln(0));
-                        s_poly.push_back(soln(1));
-                        s_poly.push_back(0.0);  // use the quintic solver with alpha_5 = 0.0                        
-                      }
-                      prev_s_poly = s_poly;
 
-                      check_path(s_poly, d_poly, sx, sy, sdx, sdy);
-                      
-                      int path_length = bootstrap ? 150 : 75;
-                      // keep the path size to 75 (5 copied + 70 new)
-                      for (int step=0; step < path_length - copy_path_cnt; step++) {
-                        auto s_soln = solve_quintic(s_poly, step * 0.02);
-                        double s = s_soln[0];
-                        auto d_soln = solve_quintic(d_poly, step * 0.02);
-                        double d = d_soln[0];
-                        auto dbl_vec = getXY(s, d, sx, sy, sdx, sdy);
-                        double x = dbl_vec[0];
-                        double y = dbl_vec[1];
-                        x_vals_raw.push_back(x);
-                        y_vals_raw.push_back(y);
+                        //bool ok = check_path(s_poly, d_poly, sx, sy, sdx, sdy);
+
+                        // start with copied x,y,s,d from previous solution
+                        x_vals_raw = next_x_vals;
+                        y_vals_raw = next_y_vals;
+                        s_vals_raw = next_s_vals;
+                        d_vals_raw = next_d_vals;
+                        int path_length = 75;
+                        assert(path_length > copy_path_cnt);
+                        // keep the path size to 75 (5 copied + 70 new)
+                        for (int step=1; step <= path_length - copy_path_cnt; step++) {
+                          auto s_soln = solve_quintic(s_poly, step * 0.02);
+                          double s = s_soln[0];
+                          auto d_soln = solve_quintic(d_poly, step * 0.02);
+                          double d = d_soln[0];
+                          auto dbl_vec = getXY(s, d, sx, sy, sdx, sdy);
+                          double x = dbl_vec[0];
+                          double y = dbl_vec[1];
+                          x_vals_raw.push_back(x);
+                          y_vals_raw.push_back(y);
+                          s_vals_raw.push_back(s);
+                          d_vals_raw.push_back(d);
+                        }
+                        
+                        bool ok = check_path(x_vals_raw, y_vals_raw);
+                        if (ok) {
+                          searching = false;
+                        } else {
+                          // try an easier trajectory
+                          search_cnt++;
+                          std::cout << "si_dot=" << si_dot << " sf_dot=" << sf_dot << " reduce target speed "
+                                    << search_cnt << " have_target "
+                                    << have_target_vehicle << " lane_change " << lane_change_state << std::endl;
+                          if (search_cnt > 5) {
+                            std::cout << "excessive search" << std::endl;
+                            searching = false;
+                          }
+                        }
+
                       }
+                      
                       if (bootstrap && car_v >= 5.0) {
                         std::cout << "end bootstrap on msg_cnt " << msg_cnt << std::endl;
                         bootstrap = false;
                       }
                       prev_x_vals = x_vals_raw;
+                      prev_s_vals = s_vals_raw;
+                      prev_d_vals = d_vals_raw;
                       next_x_vals = x_vals_raw;
                       next_y_vals = y_vals_raw;
+
+                      if (0) {
+                        std::cout << "car_x=" << car_x << " car_y=" << car_y << " next_x: ";
+                        for (int i=0; i<50; i++)
+                          std::cout << next_x_vals[i] << " ";
+                        std::cout << std::endl;
+                        std::cout << "next_y: ";
+                        for (int i=0; i<50; i++)
+                          std::cout << next_y_vals[i] << " ";
+                        std::cout << std::endl;
+                      }
                       
                       msgJson["next_x"] = next_x_vals;
                       msgJson["next_y"] = next_y_vals;
