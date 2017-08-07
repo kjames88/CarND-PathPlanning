@@ -456,11 +456,12 @@ int main() {
                         double obstacle_v = sqrt(pow(obstacle_vx,2) + pow(obstacle_vy,2));
                         auto it = vehicles.find(id);
                         if (it == vehicles.end()) {
-                          Vehicle v(id, lane, obstacle_s, obstacle_v);
+                          Vehicle v(id, lane, obstacle_s, obstacle_d, obstacle_v);
                           it = vehicles.insert(std::pair<int, Vehicle> (id, v)).first;
                         } else {
                           it->second.set_lane(lane);
                           it->second.set_s(obstacle_s);
+                          it->second.set_d(obstacle_d);
                           it->second.set_velocity(obstacle_v);
                         }
                       }
@@ -475,7 +476,6 @@ int main() {
                       double car_a = 0.0;
                       double car_vd = 0.0;
                       double car_ad = 0.0;
-                      bool have_target_vehicle = false;
                       int target_vehicle = -1;
                       double min_dist = 1e6;
                       double min_velocity = 0.0;
@@ -484,7 +484,7 @@ int main() {
                       // Either complete a lane change or look for someone to follow
                       if (lane_change_state == false) {
                         for (auto it=vehicles.begin(); it!=vehicles.end(); it++) {
-                          if (it->second.get_lane() == car_lane) {
+                          if (it->second.uses_lane(car_lane)) {
                             double dist = it->second.get_s() - car_s;
                             if (dist >= 0 && dist < min_dist) {
                               min_dist = dist;
@@ -499,70 +499,62 @@ int main() {
                           // std::cout << "LEADER id " << min_id << " distance " << min_dist << "m velocity "
                           //           << it->second.get_velocity() << "m/s" << std::endl;
                           target_vehicle = min_id;
-                          
-                          // FIXME unify duplicated code
-                          
-                          double s_lv = vehicles[target_vehicle].get_s();             // lead vehicle initial s
-                          double v_lv = vehicles[target_vehicle].get_velocity();      // lead vehicle velocity
-                          double a_lv = vehicles[target_vehicle].get_acceleration();  // lead vehicle acceleration
-                          double sf_lv = s_lv + (v_lv * T) + (0.5 * a_lv * pow(T,2)); // may be out of range
-                          double sf_max = get_map_s(sf_lv - 15.0);  // don't get closer than 15m (could be made speed dependent)
-                          if (get_map_s(car_s + (car_v * T) + (0.5 * car_a * pow(T,2))) >= sf_max) {
-                            have_target_vehicle = true;
-                          }
                         }
                       } else {
                         // keep the parameters established when we decided to change lanes
                       }
-                      if (have_target_vehicle) {
+                      if (target_vehicle >= 0) {
                         // following someone slower:  see if we can drive faster by passing in a neighboring lane
                         bool try_lane[3] = {car_lane == 1, car_lane == 2 || car_lane == 0, car_lane == 1};
                         bool block_lane[3] = {false, false, false};
                         double lane_vmax[3] = {maximum_speed, maximum_speed, maximum_speed};
                         for (auto it=vehicles.begin(); it!=vehicles.end(); it++) {
-                          int veh_lane = it->second.get_lane();
-                          if (veh_lane >= 0 && veh_lane < 3 && try_lane[veh_lane]) {
-                            double s0 = it->second.get_s();
-                            double s1;
-                            if (it->second.get_acceleration() >= 0.0) {
-                              // conservatively assume acceleration will continue and don't cut in front
-                              s1 = get_map_s(s0 + (T * it->second.get_velocity())
-                                             + (0.5 * it->second.get_acceleration() * pow(T,2)));
-                            } else {
-                              // do not project braking as it typically does not apply over the window
-                              s1 = get_map_s(s0 + (T * it->second.get_velocity()));
-                            }
-                            // block the lane if a car is within buffer distance in front or behind
-                            double dist = abs(car_s - s0);
-                            bool ahead = (car_s > s0);
-                            double car_s1 = get_map_s(car_s + (car_v * T) + (0.5 * car_a * pow(T,2)));
-                            if ((ahead && (dist < 5.0)) || (!ahead && (dist < 10.0))) {
-                              block_lane[veh_lane] = true;
-                              // std::cout << "veh " << it->first << " s=" << s0 << " car_s=" << car_s <<
-                              //   " blocks lane " << veh_lane << " (1)" << std::endl;
-                            } else if (!ahead && ((s1 - car_s1) < 20.0)) {
-                              block_lane[veh_lane] = true;
-                              // std::cout << "veh " << it->first << " s=" << s0 << "," << s1 << " car_s1=" << car_s1 <<
-                              //   " blocks lane " << veh_lane << " (1.5)" << std::endl;
-                            } else {
-                              // block the lane if a car will cross our position at velocity
-                              //   - also ignore a lane with a slower car in front
-                              if (s0 < car_s) {
-                                double car_proj = get_map_s(car_s + (car_v * T) + (0.5 * car_a * pow(T,2)));
-                                if (s1 > car_proj) {
-                                  block_lane[veh_lane] = true;
-                                  // std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (2)" << std::endl;
-                                } else if (abs(car_proj - s1) < 5.0) {
-                                  // vehicle will be too close at current velocity
-                                  block_lane[veh_lane] = true;
-                                }
-                              } else {
-                                if (dist < 50.0 && car_v > it->second.get_velocity()) {
-                                  block_lane[veh_lane] = true;
-                                  // std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (3)" << std::endl;
+                          for (int veh_lane = 0; veh_lane < 3; veh_lane++) {
+                            if (it->second.uses_lane(veh_lane)) {
+                              if (veh_lane >= 0 && veh_lane < 3 && try_lane[veh_lane]) {
+                                double s0 = it->second.get_s();
+                                double s1;
+                                if (it->second.get_acceleration() >= 0.0) {
+                                  // conservatively assume acceleration will continue and don't cut in front
+                                  s1 = get_map_s(s0 + (T * it->second.get_velocity())
+                                                 + (0.5 * it->second.get_acceleration() * pow(T,2)));
                                 } else {
-                                  if (dist < 50.0) {
-                                    lane_vmax[veh_lane] = it->second.get_velocity();
+                                  // do not project braking as it typically does not apply over the window
+                                  s1 = get_map_s(s0 + (T * it->second.get_velocity()));
+                                }
+                                // block the lane if a car is within buffer distance in front or behind
+                                double dist = abs(car_s - s0);
+                                bool ahead = (car_s > s0);
+                                double car_s1 = get_map_s(car_s + (car_v * T) + (0.5 * car_a * pow(T,2)));
+                                if ((ahead && (dist < 5.0)) || (!ahead && (dist < 10.0))) {
+                                  block_lane[veh_lane] = true;
+                                  // std::cout << "veh " << it->first << " s=" << s0 << " car_s=" << car_s <<
+                                  //   " blocks lane " << veh_lane << " (1)" << std::endl;
+                                } else if (!ahead && ((s1 - car_s1) < 20.0)) {
+                                  block_lane[veh_lane] = true;
+                                  // std::cout << "veh " << it->first << " s=" << s0 << "," << s1 << " car_s1=" << car_s1 <<
+                                  //   " blocks lane " << veh_lane << " (1.5)" << std::endl;
+                                } else {
+                                  // block the lane if a car will cross our position at velocity
+                                  //   - also ignore a lane with a slower car in front
+                                  if (s0 < car_s) {
+                                    double car_proj = get_map_s(car_s + (car_v * T) + (0.5 * car_a * pow(T,2)));
+                                    if (s1 > car_proj) {
+                                      block_lane[veh_lane] = true;
+                                      // std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (2)" << std::endl;
+                                    } else if (abs(car_proj - s1) < 5.0) {
+                                      // vehicle will be too close at current velocity
+                                      block_lane[veh_lane] = true;
+                                    }
+                                  } else {
+                                    if (dist < 50.0 && car_v > it->second.get_velocity()) {
+                                      block_lane[veh_lane] = true;
+                                      // std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (3)" << std::endl;
+                                    } else {
+                                      if (dist < 50.0) {
+                                        lane_vmax[veh_lane] = it->second.get_velocity();
+                                      }
+                                    }
                                   }
                                 }
                               }
@@ -660,6 +652,7 @@ int main() {
                       vector<double> s_vals_raw;
                       vector<double> d_vals_raw;
 
+                      bool follow_target_vehicle = false;
                       bool searching = true;
                       int search_cnt = 0;
                       while (searching) {
@@ -679,6 +672,8 @@ int main() {
                         if (lane_change_state) {
                           //std::cout << "moving into lane " << lane_change_lane << std::endl;
                           sf = si + (((si_dot + lane_change_speed) / 2.0) * T);  // assume infinite range in s to prevent reversal
+                          sf -= 5.0 * (double) search_cnt;
+                          assert (sf > si);
                           sf_dot = lane_change_speed;
                           sf_dot_dot = 0.0;
                           df = ((double) lane_change_lane * 4.0) + 2.0;
@@ -694,15 +689,24 @@ int main() {
                           df = ((double) car_lane * 4.0) + 2.0;
                           df_dot = 0.0;
                           df_dot_dot = 0.0;
-                          if (have_target_vehicle) {
+                          
+                          double s_lv = vehicles[target_vehicle].get_s();             // lead vehicle initial s
+                          double v_lv = vehicles[target_vehicle].get_velocity();      // lead vehicle velocity
+                          double a_lv = vehicles[target_vehicle].get_acceleration();  // lead vehicle acceleration
+                          double lv_fwd = (v_lv * T);    // omit acceleration because it applies over too large a time window
+                          double sf_lv = (lv_fwd > 0.0) ? (s_lv + lv_fwd) : s_lv;     // no reverse!
+                          double sf_max = sf_lv - 15.0;  // don't get closer than 15m (could be made speed dependent)
+                          if (target_vehicle >= 0) {
+                            // don't follow unless my current velocity will take me into the buffer zone
+                            //  - otherwise trajectory can cause speed surge to catch up to the buffer especially
+                            //    with projected acceleration over the window
+                            if (get_map_s(car_s + (car_v * T)) >= sf_max) {
+                              follow_target_vehicle = true;
+                            }
+                          }
+                          if (follow_target_vehicle) {
                             double target_speed = vehicles[target_vehicle].get_velocity();
                             target_speed = (target_speed > maximum_speed) ? maximum_speed : target_speed;
-                            double s_lv = vehicles[target_vehicle].get_s();             // lead vehicle initial s
-                            double v_lv = vehicles[target_vehicle].get_velocity();      // lead vehicle velocity
-                            double a_lv = vehicles[target_vehicle].get_acceleration();  // lead vehicle acceleration
-                            double lv_fwd = (v_lv * T);    // omit acceleration because it applies over too large a time window
-                            double sf_lv = (lv_fwd > 0.0) ? (s_lv + lv_fwd) : s_lv;     // no reverse!
-                            double sf_max = sf_lv - 15.0;  // don't get closer than 15m (could be made speed dependent)
                             if (sf_max <= si) {
                               std::cout << "TOO CLOSE: si=" << si << " si_dot=" << si_dot << " sf_max=" << sf_max << " veh=" <<
                                 target_vehicle << " s_lv=" << s_lv << " v_lv=" << v_lv << " a_lv=" << a_lv <<
@@ -713,7 +717,11 @@ int main() {
                               std::cout << " increased sf_max to " << sf_max << std::endl;
                             }
                             assert(sf_max > si);
-                            sf = sf_max;  // assume infinite range in s here to prevent reversal
+                            sf = si + (((si_dot + target_speed) / 2.0) * T);  // assume infinite range in s here to prevent reversal
+                            if (sf > sf_max)
+                              sf = sf_max;
+                            sf -= 5.0 * (double) search_cnt;
+                            assert (sf > si);
                             sf_dot = target_speed;
                             sf_dot_dot = 0.0;
                           } else {
@@ -795,12 +803,17 @@ int main() {
                           double s = get_map_s(s_soln[0]);
                           auto d_soln = solve_quintic(d_poly, step * 0.02);
                           double d = d_soln[0];
-
-                          if (step > 1 && (s < 0.0 || abs(s - s0) > 10.0)) {
-                            std::cout << "illegal jump in s=" << s << " wraparound?" << std::endl;
-                            break;
+                          if (lane_change_state == false) {
+                            // check d is on center
+                            double tmp = d;
+                            while (tmp >= 4.0) {
+                              tmp -= 4.0;
+                            }
+                            if (tmp < 1.65 || tmp > 2.35) {
+                              std::cout << "car_d=" << car_d << " d=" << d << " center violation: " << tmp << std::endl;
+                            }
                           }
-                          
+
                           auto dbl_vec = getXY(s, d, sx, sy, sdx, sdy);
                           double x = dbl_vec[0];
                           double y = dbl_vec[1];
@@ -836,11 +849,14 @@ int main() {
                         } else {
                           // try an easier trajectory
                           search_cnt++;
-                          std::cout << "max_ratio=" << max_ratio << " si_dot=" << si_dot << " si_dot_dot=" << si_dot_dot
-                                    << " sf_dot=" << sf_dot << " sf_dot_dot=" << sf_dot_dot << " reduce target speed "
-                                    << search_cnt << " have_target "
-                                    << have_target_vehicle << " lane_change " << lane_change_state << std::endl;
-                          searching = false;
+                          std::cout << "max_ratio=" << max_ratio << " si=" << si << " si_dot=" << si_dot
+                                    << " si_dot_dot=" << si_dot_dot << " sf=" << sf
+                                    << " sf_dot=" << sf_dot << " sf_dot_dot=" << sf_dot_dot
+                                    << " search_cnt=" << search_cnt << " have_target "
+                                    << follow_target_vehicle << " lane_change " << lane_change_state << std::endl;
+                          if (search_cnt >= 5) {
+                            searching = false;
+                          }
                         }
 
                       }                      
