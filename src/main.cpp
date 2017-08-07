@@ -523,8 +523,15 @@ int main() {
                           int veh_lane = it->second.get_lane();
                           if (veh_lane >= 0 && veh_lane < 3 && try_lane[veh_lane]) {
                             double s0 = it->second.get_s();
-                            double s1 = get_map_s(s0 + (T * it->second.get_velocity())
-                                                  + (0.5 * it->second.get_acceleration() * pow(T,2)));
+                            double s1;
+                            if (it->second.get_acceleration() >= 0.0) {
+                              // conservatively assume acceleration will continue and don't cut in front
+                              s1 = get_map_s(s0 + (T * it->second.get_velocity())
+                                             + (0.5 * it->second.get_acceleration() * pow(T,2)));
+                            } else {
+                              // do not project braking as it typically does not apply over the window
+                              s1 = get_map_s(s0 + (T * it->second.get_velocity()));
+                            }
                             // block the lane if a car is within buffer distance in front or behind
                             double dist = abs(car_s - s0);
                             bool ahead = (car_s > s0);
@@ -541,9 +548,13 @@ int main() {
                               // block the lane if a car will cross our position at velocity
                               //   - also ignore a lane with a slower car in front
                               if (s0 < car_s) {
-                                if (s1 > get_map_s(car_s + (car_v * T) + (0.5 * car_a * pow(T,2)))) {
+                                double car_proj = get_map_s(car_s + (car_v * T) + (0.5 * car_a * pow(T,2)));
+                                if (s1 > car_proj) {
                                   block_lane[veh_lane] = true;
                                   // std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (2)" << std::endl;
+                                } else if (abs(car_proj - s1) < 5.0) {
+                                  // vehicle will be too close at current velocity
+                                  block_lane[veh_lane] = true;
                                 }
                               } else {
                                 if (dist < 50.0 && car_v > it->second.get_velocity()) {
@@ -592,7 +603,6 @@ int main() {
                         int popped = prev_x_vals.size() - previous_path_x.size();
                         assert(prev_x_vals.size() == prev_s_vals.size());
                         assert(prev_x_vals.size() == prev_d_vals.size());
-                        assert(popped > 0);
                       
                         // stitch in the beginning of the previous path and then project from there for continuity
                         double init_x = previous_path_x[0];
@@ -690,7 +700,7 @@ int main() {
                             double s_lv = vehicles[target_vehicle].get_s();             // lead vehicle initial s
                             double v_lv = vehicles[target_vehicle].get_velocity();      // lead vehicle velocity
                             double a_lv = vehicles[target_vehicle].get_acceleration();  // lead vehicle acceleration
-                            double lv_fwd = (v_lv * T) + (0.5 * a_lv * pow(T,2));
+                            double lv_fwd = (v_lv * T);    // omit acceleration because it applies over too large a time window
                             double sf_lv = (lv_fwd > 0.0) ? (s_lv + lv_fwd) : s_lv;     // no reverse!
                             double sf_max = sf_lv - 15.0;  // don't get closer than 15m (could be made speed dependent)
                             if (sf_max <= si) {
@@ -786,6 +796,10 @@ int main() {
                           double x = dbl_vec[0];
                           double y = dbl_vec[1];
 
+                          if (step > 1 && abs(s - s0) > 10.0) {
+                            std::cout << "illegal jump in s:  wraparound?" << std::endl;
+                            break;
+                          }
                           if (step > 1) {
                             double ratio = distance(x0, y0, x, y) / (s - s0);
                             if (ratio > max_ratio) {
