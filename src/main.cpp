@@ -25,6 +25,9 @@ constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
 double rad2deg(double x) { return x * 180 / pi(); }
 
+// The max s value before wrapping around the track back to 0
+double max_s = 6945.554;
+
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
 // else the empty string "" will be returned.
@@ -171,6 +174,7 @@ vector<double> getXY(double s, double d,
                      vector<double>& maps_s, vector<double>& maps_x, vector<double>& maps_y,
                      vector<double>& maps_dx, vector<double>& maps_dy) {
   
+  assert(s >= 0.0 && s <= max_s);
   int prev_wp = -1;
 
   while(s > maps_s[prev_wp+1] && (prev_wp < (int)(maps_s.size()-1) ))
@@ -188,9 +192,21 @@ vector<double> getXY(double s, double d,
 
 vector<double> getXY(double s, double d,
                      tk::spline& sx, tk::spline& sy, tk::spline& sdx, tk::spline& sdy) {
+  if (s < 0.0 || s > max_s) {
+    std::cout << "s=" << s << " out of range!" << std::endl;
+  }
+  assert(s >= 0.0 && s <= max_s);
   double x = sx(s) + (d * sdx(s));
   double y = sy(s) + (d * sdy(s));
   return {x,y};
+}
+
+double get_map_s(double s) {
+  double s_map = s;
+  while (s_map > max_s) {
+    s_map -= max_s;
+  }
+  return s_map;
 }
 
 std::vector<double> solve_quintic(std::vector<double>& poly, double t) {
@@ -214,23 +230,19 @@ bool check_path(std::vector<double> s_poly, std::vector<double> d_poly,
   double max_speed = mph_to_mps(50.0);
   double max_acc = 10.0;
   double max_jerk = 10.0;
-  double x_prev[3];
-  double y_prev[3];
-  double v_prev;
-  double a_prev;
+  double x_prev[3] = {0.0, 0.0, 0.0};
+  double y_prev[3] = {0.0, 0.0, 0.0};
+  double v_prev = 0.0;
+  double a_prev = 0.0;
   for (int i=0; i<50; i++) {
     double t = (double) i * 0.02;
     auto s_soln = solve_quintic(s_poly, t);
     auto d_soln = solve_quintic(d_poly, t);
-    double s = s_soln[0];
+    double s = get_map_s(s_soln[0]);
     double d = d_soln[0];
     auto dbl_vec = getXY(s, d, sx, sy, sdx, sdy);
     double x = dbl_vec[0];
     double y = dbl_vec[1];
-    for (int j=2; j>0; j--) {
-      x_prev[j] = x_prev[j-1];
-      y_prev[j] = y_prev[j-1];
-    }
     if (i>0) {
       // check speed
       double v = sqrt(pow(x-x_prev[0],2) + pow(y-y_prev[0],2)) / 0.02;
@@ -243,20 +255,26 @@ bool check_path(std::vector<double> s_poly, std::vector<double> d_poly,
         // check acceleration
         double a = (v-v_prev) / 0.02;
         if (a > max_acc) {
-          //std::cout << "FAIL a=" << a << std::endl;
-          //fail = true;
+          std::cout << "FAIL a=" << a << std::endl;
+          fail = true;
+          return false;
         }
         if (i>2) {
           // check jerk
           double j = (a - a_prev) / 0.02;
           if (j > max_jerk) {
-            //std::cout << "FAIL j=" << j << std::endl;
-            //fail = true;
+            // std::cout << "FAIL j=" << j << std::endl;
+            // fail = true;
+            // return false;
           }
         }
         a_prev = a;
       }
       v_prev = v;
+    }
+    for (int j=2; j>0; j--) {
+      x_prev[j] = x_prev[j-1];
+      y_prev[j] = y_prev[j-1];
     }
     x_prev[0] = x;
     y_prev[0] = y;
@@ -272,18 +290,14 @@ bool check_path(std::vector<double> next_x, std::vector<double> next_y) {
   double max_speed = mph_to_mps(50.0);
   double max_acc = 10.0;
   double max_jerk = 10.0;
-  double x_prev[3];
-  double y_prev[3];
-  double v_prev;
-  double a_prev;
+  double x_prev[3] = {0.0, 0.0, 0.0};
+  double y_prev[3] = {0.0, 0.0, 0.0};
+  double v_prev = 0.0;
+  double a_prev = 0.0;
   for (int i=0; i<50; i++) {
     double t = (double) i * 0.02;
     double x = next_x[i];
     double y = next_y[i];
-    for (int j=2; j>0; j--) {
-      x_prev[j] = x_prev[j-1];
-      y_prev[j] = y_prev[j-1];
-    }
     if (i>0) {
       // check speed
       double v = sqrt(pow(x-x_prev[0],2) + pow(y-y_prev[0],2)) / 0.02;
@@ -296,20 +310,26 @@ bool check_path(std::vector<double> next_x, std::vector<double> next_y) {
         // check acceleration
         double a = (v-v_prev) / 0.02;
         if (a > max_acc) {
-          //std::cout << "FAIL a=" << a << std::endl;
-          //fail = true;
+          std::cout << "FAIL a=" << a << std::endl;
+          fail = true;
+          return false;
         }
         if (i>2) {
           // check jerk
           double j = (a - a_prev) / 0.02;
           if (j > max_jerk) {
-            //std::cout << "FAIL j=" << j << std::endl;
-            //fail = true;
+            // std::cout << "FAIL j=" << j << ", a=" << a << " a_prev=" << a_prev << std::endl;
+            // fail = true;
+            // return false;
           }
         }
         a_prev = a;
       }
       v_prev = v;
+    }
+    for (int j=2; j>0; j--) {
+      x_prev[j] = x_prev[j-1];
+      y_prev[j] = y_prev[j-1];
     }
     x_prev[0] = x;
     y_prev[0] = y;
@@ -329,8 +349,6 @@ int main() {
 
   // Waypoint map to read from
   string map_file_ = "../data/highway_map.csv";
-  // The max s value before wrapping around the track back to 0
-  double max_s = 6945.554;
 
   ifstream in_map_(map_file_.c_str(), ifstream::in);
 
@@ -354,6 +372,18 @@ int main() {
     map_waypoints_dy.push_back(d_y);
   }
 
+  // Create a wrap-around waypoint for the splines to follow from the track end to the track start
+  //   x,y,dx,dy are all those of the first waypoint on the track
+  //   for s we'll create an out of range s coordinate at the first waypoint
+  double s_first = map_waypoints_s.front();
+  double s_last = map_waypoints_s.back();
+  double s_extended = s_first + max_s;
+  map_waypoints_s.push_back(s_extended);
+  map_waypoints_x.push_back(map_waypoints_x.front());
+  map_waypoints_y.push_back(map_waypoints_y.front());
+  map_waypoints_dx.push_back(map_waypoints_dx.front());
+  map_waypoints_dy.push_back(map_waypoints_dy.front());
+  
   // following what others are mentioning on forum and slack, instead of spline x,y waypoints,
   //   spline s,x and s,y and then mapping from s should be simple
   tk::spline sx;
@@ -365,26 +395,6 @@ int main() {
   sdx.set_points(map_waypoints_s, map_waypoints_dx);
   sdy.set_points(map_waypoints_s, map_waypoints_dy);
   
-  // create a higher resolution map by interpolating the waypoint map
-  std::vector<double> hires_s;
-  std::vector<double> hires_x;
-  std::vector<double> hires_y;
-  std::vector<double> hires_dx;
-  std::vector<double> hires_dy;
-  for (int i=0; i < map_waypoints_s.size() - 1; i++) {
-    double s0 = map_waypoints_s[i];
-    double s1 = map_waypoints_s[i+1];
-    int meters = s1 - s0;
-    for (int j=0; j < meters; j++) {
-      double s = s0 + (double) j;
-      hires_s.push_back(s);
-      hires_x.push_back(sx(s));
-      hires_y.push_back(sy(s));
-      hires_dx.push_back(sdx(s));
-      hires_dy.push_back(sdy(s));
-    }
-  }
-
   std::map<int, Vehicle> vehicles;
   std::vector<double> prev_x_vals;
   std::vector<double> prev_s_vals;
@@ -394,8 +404,8 @@ int main() {
   int lane_change_lane = 0;
   double lane_change_speed = 0.0;
   int msg_cnt = 0;
-  bool bootstrap = false;
-  h.onMessage([&bootstrap, &vehicles, &car_lane,
+  double max_ratio = 1.0;      // x,y distance to s distance ratio for regulating s_dot
+  h.onMessage([&max_ratio, &vehicles, &car_lane,
                &lane_change_state, &lane_change_lane, &lane_change_speed,
                &msg_cnt, &prev_x_vals, &prev_s_vals, &prev_d_vals,
                &sx, &sy, &sdx, &sdy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
@@ -459,7 +469,8 @@ int main() {
                       //   find any vehicle in my lane (assume obstacle vehicles don't drive on the lines)
                       //   sort by closest distance
                       double T = 3.0;
-                      double maximum_speed = mph_to_mps(48.0);
+                      assert(max_ratio >= 1.0);
+                      double maximum_speed = mph_to_mps(48.5 / max_ratio);
                       double car_v = mph_to_mps(car_speed);
                       double car_a = 0.0;
                       double car_vd = 0.0;
@@ -469,7 +480,7 @@ int main() {
                       double min_dist = 1e6;
                       double min_velocity = 0.0;
                       int min_id = -1;
-
+                      
                       // Either complete a lane change or look for someone to follow
                       if (lane_change_state == false) {
                         for (auto it=vehicles.begin(); it!=vehicles.end(); it++) {
@@ -494,9 +505,9 @@ int main() {
                           double s_lv = vehicles[target_vehicle].get_s();             // lead vehicle initial s
                           double v_lv = vehicles[target_vehicle].get_velocity();      // lead vehicle velocity
                           double a_lv = vehicles[target_vehicle].get_acceleration();  // lead vehicle acceleration
-                          double sf_lv = s_lv + (v_lv * T) + (0.5 * a_lv * pow(T,2));
-                          double sf_max = sf_lv - 15.0;  // don't get closer than 15m (could be made speed dependent)
-                          if (car_s + (car_v * T) >= sf_max) {
+                          double sf_lv = s_lv + (v_lv * T) + (0.5 * a_lv * pow(T,2)); // may be out of range
+                          double sf_max = get_map_s(sf_lv - 15.0);  // don't get closer than 15m (could be made speed dependent)
+                          if (get_map_s(car_s + (car_v * T) + (0.5 * car_a * pow(T,2))) >= sf_max) {
                             have_target_vehicle = true;
                           }
                         }
@@ -512,11 +523,12 @@ int main() {
                           int veh_lane = it->second.get_lane();
                           if (veh_lane >= 0 && veh_lane < 3 && try_lane[veh_lane]) {
                             double s0 = it->second.get_s();
-                            double s1 = s0 + (T * it->second.get_velocity()) + (0.5 * it->second.get_acceleration() * pow(T,2));
+                            double s1 = get_map_s(s0 + (T * it->second.get_velocity())
+                                                  + (0.5 * it->second.get_acceleration() * pow(T,2)));
                             // block the lane if a car is within buffer distance in front or behind
                             double dist = abs(car_s - s0);
                             bool ahead = (car_s > s0);
-                            double car_s1 = car_s + (car_v * T) + (0.5 * car_a * pow(T,2));
+                            double car_s1 = get_map_s(car_s + (car_v * T) + (0.5 * car_a * pow(T,2)));
                             if ((ahead && (dist < 5.0)) || (!ahead && (dist < 10.0))) {
                               block_lane[veh_lane] = true;
                               // std::cout << "veh " << it->first << " s=" << s0 << " car_s=" << car_s <<
@@ -529,7 +541,7 @@ int main() {
                               // block the lane if a car will cross our position at velocity
                               //   - also ignore a lane with a slower car in front
                               if (s0 < car_s) {
-                                if (s1 > (car_s + (car_v * T) + (0.5 * car_a * pow(T,2)))) {
+                                if (s1 > get_map_s(car_s + (car_v * T) + (0.5 * car_a * pow(T,2)))) {
                                   block_lane[veh_lane] = true;
                                   // std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (2)" << std::endl;
                                 }
@@ -559,7 +571,10 @@ int main() {
                           lane_change_state = true;
                           lane_change_lane = max_lane;
                           lane_change_speed = max_v;
-                          // FIXME search space
+                          double max_lane_change_speed = 0.9 * (mph_to_mps(50.0));  // account for curvature and d component
+                          if (lane_change_speed > max_lane_change_speed) {
+                            lane_change_speed = max_lane_change_speed;
+                          }
                         }
                       }
                       
@@ -654,7 +669,7 @@ int main() {
                         if (lane_change_state) {
                           //std::cout << "moving into lane " << lane_change_lane << std::endl;
                           sf = si + (((si_dot + lane_change_speed) / 2.0) * T);
-                          sf_dot = lane_change_speed - (double) (search_cnt);
+                          sf_dot = lane_change_speed;
                           sf_dot_dot = 0.0;
                           df = ((double) lane_change_lane * 4.0) + 2.0;
                           df_dot = 0.0;
@@ -670,11 +685,13 @@ int main() {
                           df_dot = 0.0;
                           df_dot_dot = 0.0;
                           if (have_target_vehicle) {
-                            double target_speed = vehicles[target_vehicle].get_velocity() - (double) search_cnt;
+                            double target_speed = vehicles[target_vehicle].get_velocity();
+                            target_speed = (target_speed > maximum_speed) ? maximum_speed : target_speed;
                             double s_lv = vehicles[target_vehicle].get_s();             // lead vehicle initial s
                             double v_lv = vehicles[target_vehicle].get_velocity();      // lead vehicle velocity
                             double a_lv = vehicles[target_vehicle].get_acceleration();  // lead vehicle acceleration
-                            double sf_lv = s_lv + (v_lv * T) + (0.5 * a_lv * pow(T,2));
+                            double lv_fwd = (v_lv * T) + (0.5 * a_lv * pow(T,2));
+                            double sf_lv = (lv_fwd > 0.0) ? (s_lv + lv_fwd) : s_lv;     // no reverse!
                             double sf_max = sf_lv - 15.0;  // don't get closer than 15m (could be made speed dependent)
                             if (sf_max <= si) {
                               std::cout << "TOO CLOSE: si=" << si << " si_dot=" << si_dot << " sf_max=" << sf_max << " veh=" <<
@@ -683,7 +700,7 @@ int main() {
                               while (si >= sf_max) {
                                 sf_max += 1.0;
                               }
-                              std::cout << " dropped sf_max to " << sf_max << std::endl;
+                              std::cout << " increased sf_max to " << sf_max << std::endl;
                             }
                             assert(sf_max > si);
                             sf = sf_max;
@@ -692,7 +709,7 @@ int main() {
                           } else {
                             // quadric 2 eqn with no target sf
                             use_quintic = false;
-                            double delta_s_dot = -1.0 * (double) search_cnt;  // trajectory search space
+                            double delta_s_dot = 0.0;  // trajectory search space
                             double target_speed = maximum_speed + delta_s_dot;
                             target_speed = (target_speed > maximum_speed) ? maximum_speed : target_speed;
                             sf_dot = target_speed;
@@ -758,14 +775,27 @@ int main() {
                         int path_length = 75;
                         assert(path_length > copy_path_cnt);
                         // keep the path size to 75 (5 copied + 70 new)
+                        double s0, x0, y0;
+                        max_ratio = 1.0;
                         for (int step=1; step <= path_length - copy_path_cnt; step++) {
                           auto s_soln = solve_quintic(s_poly, step * 0.02);
-                          double s = s_soln[0];
+                          double s = get_map_s(s_soln[0]);
                           auto d_soln = solve_quintic(d_poly, step * 0.02);
                           double d = d_soln[0];
                           auto dbl_vec = getXY(s, d, sx, sy, sdx, sdy);
                           double x = dbl_vec[0];
                           double y = dbl_vec[1];
+
+                          if (step > 1) {
+                            double ratio = distance(x0, y0, x, y) / (s - s0);
+                            if (ratio > max_ratio) {
+                              max_ratio = ratio;
+                            }
+                          }
+                          s0 = s;
+                          x0 = x;
+                          y0 = y;
+                          
                           x_vals_raw.push_back(x);
                           y_vals_raw.push_back(y);
                           s_vals_raw.push_back(s);
@@ -778,21 +808,14 @@ int main() {
                         } else {
                           // try an easier trajectory
                           search_cnt++;
-                          std::cout << "si_dot=" << si_dot << " sf_dot=" << sf_dot << " reduce target speed "
+                          std::cout << "max_ratio=" << max_ratio << " si_dot=" << si_dot << " si_dot_dot=" << si_dot_dot
+                                    << " sf_dot=" << sf_dot << " sf_dot_dot=" << sf_dot_dot << " reduce target speed "
                                     << search_cnt << " have_target "
                                     << have_target_vehicle << " lane_change " << lane_change_state << std::endl;
-                          if (search_cnt > 5) {
-                            std::cout << "excessive search" << std::endl;
-                            searching = false;
-                          }
+                          searching = false;
                         }
 
-                      }
-                      
-                      if (bootstrap && car_v >= 5.0) {
-                        std::cout << "end bootstrap on msg_cnt " << msg_cnt << std::endl;
-                        bootstrap = false;
-                      }
+                      }                      
                       prev_x_vals = x_vals_raw;
                       prev_s_vals = s_vals_raw;
                       prev_d_vals = d_vals_raw;
