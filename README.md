@@ -4,6 +4,12 @@
 
 Path generation is handled in the Frenet domain.  The *s* coordinate is the longitudinal distance down the lane, and the *d* coordinate is the lateral position on the road.  Under normal circumstances, *d* should have a fixed value corresponding to the center of one of three 4m wide lanes.  The *s* coordinate has a range of up to 6945.554m, after which it wraps back to zero at the start of the track.
 
+###Smoothing the Path
+
+Generating x,y coordinates directly from s,d coordinates using only the provided waypoints causes high acceleration or jerk around the waypoints.  Splines are used to smooth the translation, but this a bit tricky.  Smoothing the path output from getXY does not work - the spline passes through all the points given, and the points given by getXY form a piecewise linear path.  Fitting a spline to the x,y points looks good but correlating back to s,d becomes a problem.  Some comments on the *slack* channel saved the day here:  fit functions from s to {x,y,dx,dy}.  The getXY function used here is based directly on these splines, with *dx* and *dy* required for incorporating *d*.
+
+On the topic of *d* there may be an issue in the computation, which does not agree completely with the simulator.  While the graphics do not show a wheel on the line, the simulator periodically flags a lane violation.  *After some testing, it appears that driving 0.5m left of center performs better than driving on center.  With this bias I can clearly see the wheels on the line at times (as rendered) but there are no lane violation errors.  Conversely, when driving on center I see the wheels safely between the lines but I get lane violations.  The numeric errors between computed d and simulator reported d swing both positive and negative, so the circumstances feel like a threshold error in triggering lane violations.*
+
 ###Velocity without a leader
 
 Since the car starts at zero velocity, it is immediately necessary to generate a path that gets the car moving.  Without another car in front, there is no need to specify a distance, only velocity and acceleration targets.  As suggested for this purpose in *Optimal Trajectory Generation for Dynamic Street Scenarios in a Frenet Frame* a quadric polynomial is solved for the desired maximum speed and zero acceleration at the end of a 3 second period.
