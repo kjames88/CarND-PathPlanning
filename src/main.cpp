@@ -169,25 +169,29 @@ vector<double> getXY(double s, double d, vector<double> maps_s, vector<double> m
 
 }
 
+double get_map_s(double s) {
+  double s_map = s;
+  while (s_map > max_s) {
+    s_map -= max_s;
+  }
+  return s_map;
+}
+
 // Transform from Frenet s,d coordinates to Cartesian x,y
-//   - extended withd dx,dy since the initial method drifted in d using spline fit hires map
 vector<double> getXY(double s, double d,
-                     vector<double>& maps_s, vector<double>& maps_x, vector<double>& maps_y,
-                     vector<double>& maps_dx, vector<double>& maps_dy) {
+                     tk::spline& sx, tk::spline& sy) {
   
   assert(s >= 0.0 && s <= max_s);
-  int prev_wp = -1;
+  double s1 = get_map_s(s + 1.0);
+  double x0 = sx(s);
+  double x1 = sx(s1);
+  double y0 = sy(s);
+  double y1 = sy(s1);
+  double heading = atan2((y1-y0),(x1-x0));
+  double perp_heading = heading - pi()/2.0;
 
-  while(s > maps_s[prev_wp+1] && (prev_wp < (int)(maps_s.size()-1) ))
-    {
-      prev_wp++;
-    }
-  int wp2 = (prev_wp+1)%maps_x.size();
-  double heading = atan2((maps_y[wp2]-maps_y[prev_wp]),(maps_x[wp2]-maps_x[prev_wp]));
-  double delta = s - maps_s[prev_wp];
-  
-  double x = maps_x[prev_wp] + (delta * cos(heading)) + (d * maps_dx[prev_wp]);
-  double y = maps_y[prev_wp] + (delta * sin(heading)) + (d * maps_dy[prev_wp]);
+  double x = x0 + d * cos(perp_heading);
+  double y = y0 + d * sin(perp_heading);
   return {x,y};
 }
 
@@ -200,14 +204,6 @@ vector<double> getXY(double s, double d,
   double x = sx(s) + (d * sdx(s));
   double y = sy(s) + (d * sdy(s));
   return {x,y};
-}
-
-double get_map_s(double s) {
-  double s_map = s;
-  while (s_map > max_s) {
-    s_map -= max_s;
-  }
-  return s_map;
 }
 
 std::vector<double> solve_quintic(std::vector<double>& poly, double t) {
@@ -619,15 +615,6 @@ int main() {
                       if (car_speed > 50.0) {
                         std::cout << "simulator speed violation speed=" << car_speed << std::endl;
                       }
-                      if (lane_change_state == false) {
-                        double tmp = car_d;
-                        while (tmp >= 4.0) {
-                          tmp -= 4.0;
-                        }
-                        if ((tmp < 1.0) || (tmp > 3.0)) {
-                          std::cout << "simulator lane violation d=" << car_d << std::endl;
-                        }
-                      }
                       
                       // Sensor Fusion Data, a list of all other cars on the same side of the road.
                       //  Format:  [id,x,y,vx,vy,s,d]
@@ -698,7 +685,7 @@ int main() {
                           car_s = next_s_vals[idx_back];
                           car_v = (next_s_vals[idx_back] - next_s_vals[idx_back-1]) / 0.02;
                           car_a = (car_v - ((next_s_vals[idx_back-1] - next_s_vals[idx_back-2]) / 0.02)) / 0.02;
-
+                          
                           car_d = next_d_vals[idx_back];
                           car_vd = (next_d_vals[idx_back] - next_d_vals[idx_back-1]) / 0.02;
                           car_ad = (car_vd - ((next_d_vals[idx_back-1] - next_d_vals[idx_back-2]) / 0.02)) / 0.02;
@@ -707,9 +694,6 @@ int main() {
                         //           << " car_v=" << car_v << " car_a=" << car_a << std::endl;                        
                         
                       } else {
-
-                        std::cout << "Car is stopped" << std::endl;
-                        
                         copy_path_cnt = 0;
                         car_lane = car_d / 4.0;  // start out in the lane set by the simulator init
                       }
@@ -748,17 +732,18 @@ int main() {
                           assert (sf > si);
                           sf_dot = lane_change_speed;
                           sf_dot_dot = 0.0;
-                          df = ((double) lane_change_lane * 4.0) + 2.0;
+                          // offset to left side of lane due to lane violations on center (see README.md)
+                          df = ((double) lane_change_lane * 4.0) + 1.5; //2.0;
                           df_dot = 0.0;
                           df_dot_dot = 0.0;
 
                           if (abs(df - di) < 0.1) {
-                            std::cout << "completed lane change" << std::endl;
                             car_lane = lane_change_lane;
                             lane_change_state = false;
                           }
                         } else {
-                          df = ((double) car_lane * 4.0) + 2.0;
+                          // offset to left side of lane due to lane violations on center (see README.md)
+                          df = ((double) car_lane * 4.0) + 1.5; //2.0;
                           df_dot = 0.0;
                           df_dot_dot = 0.0;
                           
@@ -839,16 +824,6 @@ int main() {
                           double s = get_map_s(s_soln[0]);
                           auto d_soln = solve_quintic(d_poly, step * 0.02);
                           double d = d_soln[0];
-                          if (lane_change_state == false) {
-                            // check d is on center
-                            double tmp = d;
-                            while (tmp >= 4.0) {
-                              tmp -= 4.0;
-                            }
-                            if (tmp < 1.65 || tmp > 2.35) {
-                              std::cout << "car_d=" << car_d << " d=" << d << " center violation: " << tmp << std::endl;
-                            }
-                          }
 
                           auto dbl_vec = getXY(s, d, sx, sy, sdx, sdy);
                           double x = dbl_vec[0];
