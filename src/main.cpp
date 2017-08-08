@@ -6,6 +6,7 @@
 #include <thread>
 #include <vector>
 #include <map>
+#include <tuple>
 #include <time.h>
 #include <assert.h>
 #include "Eigen-3.3/Eigen/Core"
@@ -337,6 +338,180 @@ bool check_path(std::vector<double> next_x, std::vector<double> next_y) {
   return !fail;
 }
 
+int vehicle_in_front(nlohmann::basic_json<>& sensor_fusion, double car_s,
+                     int car_lane, std::map<int, Vehicle>& vehicles) {
+  int veh = -1;
+  int min_id = -1;
+  double min_dist = 1e6;
+  double min_velocity = 0.0;
+  for (int i=0; i<sensor_fusion.size(); i++) {
+    int id = sensor_fusion[i][0];
+    double obstacle_d = sensor_fusion[i][6];
+    int lane = obstacle_d / 4.0;
+    double obstacle_s = sensor_fusion[i][5];
+    double obstacle_vx = sensor_fusion[i][3];
+    double obstacle_vy = sensor_fusion[i][4];
+    double obstacle_v = sqrt(pow(obstacle_vx,2) + pow(obstacle_vy,2));
+    auto it = vehicles.find(id);
+    if (it == vehicles.end()) {
+      Vehicle v(id, lane, obstacle_s, obstacle_d, obstacle_v);
+      it = vehicles.insert(std::pair<int, Vehicle> (id, v)).first;
+    } else {
+      it->second.set_lane(lane);
+      it->second.set_s(obstacle_s);
+      it->second.set_d(obstacle_d);
+      it->second.set_velocity(obstacle_v);
+    }
+  }
+  for (auto it=vehicles.begin(); it!=vehicles.end(); it++) {
+    if (it->second.uses_lane(car_lane)) {
+      double dist = it->second.get_s() - car_s;
+      if (dist >= 0 && dist < min_dist) {
+        min_dist = dist;
+        min_id = it->first;
+        min_velocity = it->second.get_velocity();
+      }
+    }
+  }
+  if (min_id >= 0 && min_dist < 50.0) {
+    auto it = vehicles.find(min_id);
+    assert (it != vehicles.end());
+    // std::cout << "LEADER id " << min_id << " distance " << min_dist << "m velocity "
+    //           << it->second.get_velocity() << "m/s" << std::endl;
+    veh = min_id;
+  }
+  return veh;
+}
+
+std::tuple<bool, int, double>
+change_lanes(double car_s, double car_v, double car_a, int car_lane, double T,
+             double maximum_speed, std::map<int, Vehicle>& vehicles) {
+  // following someone slower:  see if we can drive faster by passing in a neighboring lane
+  bool lane_change = false;
+  int lane = -1;
+  double speed = 0.0;
+  bool try_lane[3] = {car_lane == 1, car_lane == 2 || car_lane == 0, car_lane == 1};
+  bool block_lane[3] = {false, false, false};
+  double lane_vmax[3] = {maximum_speed, maximum_speed, maximum_speed};
+  for (auto it=vehicles.begin(); it!=vehicles.end(); it++) {
+    for (int veh_lane = 0; veh_lane < 3; veh_lane++) {
+      if (it->second.uses_lane(veh_lane)) {
+        if (veh_lane >= 0 && veh_lane < 3 && try_lane[veh_lane]) {
+          double s0 = it->second.get_s();
+          double s1;
+          if (it->second.get_acceleration() >= 0.0) {
+            // conservatively assume acceleration will continue and don't cut in front
+            s1 = get_map_s(s0 + (T * it->second.get_velocity())
+                           + (0.5 * it->second.get_acceleration() * pow(T,2)));
+          } else {
+            // do not project braking as it typically does not apply over the window
+            s1 = get_map_s(s0 + (T * it->second.get_velocity()));
+          }
+          // block the lane if a car is within buffer distance in front or behind
+          double dist = abs(car_s - s0);
+          bool ahead = (car_s > s0);
+          double car_s1 = get_map_s(car_s + (car_v * T) + (0.5 * car_a * pow(T,2)));
+          if ((ahead && (dist < 5.0)) || (!ahead && (dist < 10.0))) {
+            block_lane[veh_lane] = true;
+            // std::cout << "veh " << it->first << " s=" << s0 << " car_s=" << car_s <<
+            //   " blocks lane " << veh_lane << " (1)" << std::endl;
+          } else if (!ahead && ((s1 - car_s1) < 20.0)) {
+            block_lane[veh_lane] = true;
+            // std::cout << "veh " << it->first << " s=" << s0 << "," << s1 << " car_s1=" << car_s1 <<
+            //   " blocks lane " << veh_lane << " (1.5)" << std::endl;
+          } else {
+            // block the lane if a car will cross our position at velocity
+            //   - also ignore a lane with a slower car in front
+            if (s0 < car_s) {
+              double car_proj = get_map_s(car_s + (car_v * T) + (0.5 * car_a * pow(T,2)));
+              if (s1 > (car_proj - 5.0)) {
+                block_lane[veh_lane] = true;
+                // std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (2)" << std::endl;
+              } else if (abs(car_proj - s1) < 5.0) {
+                // vehicle will be too close at current velocity
+                block_lane[veh_lane] = true;
+              }
+            } else {
+              if (dist < 50.0 && car_v > it->second.get_velocity()) {
+                block_lane[veh_lane] = true;
+                // std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (3)" << std::endl;
+              } else {
+                if (dist < 50.0) {
+                  lane_vmax[veh_lane] = it->second.get_velocity();
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  int max_lane = -1;
+  double max_v = 0.0;
+  for (int i=0; i<3; i++) {
+    if (try_lane[i] && !block_lane[i]) {
+      max_lane = i;
+      max_v = lane_vmax[i];
+    }
+  }
+  if (max_lane >= 0) {
+    // std::cout << "we can move into lane " << max_lane << " v=" << max_v << std::endl;
+    lane_change = true;
+    lane = max_lane;
+    speed = max_v;
+    double max_lane_change_speed = 0.9 * (mph_to_mps(50.0));  // account for curvature and d component
+    if (speed > max_lane_change_speed) {
+      speed = max_lane_change_speed;
+    }
+  }
+  return std::make_tuple(lane_change, lane, speed);
+}
+
+std::vector<double> get_trajectory_quintic(double xi, double xi_dot, double xi_dot_dot,
+                                           double xf, double xf_dot, double xf_dot_dot,
+                                           double T) {
+  std::vector<double> poly;
+  Eigen::MatrixXf m(3,3);
+  m << pow(T,3), pow(T,4), pow(T,5),
+    3.0 * pow(T,2), 4.0 * pow(T,3), 5.0 * pow(T,4),
+    6.0 * T, 12.0 * pow(T,2), 20.0 * pow(T,3);
+  Eigen::MatrixXf m_inv = m.inverse();
+  Eigen::Vector3f v;
+  v << (xf - (xi + (xi_dot * T) + (0.5 * xi_dot_dot * pow(T,2)))),
+    (xf_dot - (xi_dot + (xi_dot_dot * T))),
+    (xf_dot_dot - xi_dot_dot);
+  Eigen::Vector3f soln = m_inv * v;
+  poly.push_back(xi);
+  poly.push_back(xi_dot);
+  poly.push_back(0.5 * xi_dot_dot);
+  poly.push_back(soln(0));
+  poly.push_back(soln(1));
+  poly.push_back(soln(2));
+  return poly;
+}
+
+std::vector<double> get_trajectory_quadric(double xi, double xi_dot, double xi_dot_dot,
+                                           double xf_dot, double xf_dot_dot,
+                                           double T) {
+  // quadric 2 eqn with no target xf
+  std::vector<double> poly;
+  Eigen::MatrixXf m(2,2);
+  m << 3.0 * pow(T,2), 4.0 * pow(T,3),
+    6.0 * T, 12.0 * pow(T,2);
+  Eigen::MatrixXf m_inv = m.inverse();
+  Eigen::Vector2f v;
+  v << xf_dot - (xi_dot + xi_dot_dot * T),
+    xf_dot_dot - xi_dot_dot;
+  Eigen::Vector2f soln = m_inv * v;
+  poly.push_back(xi);
+  poly.push_back(xi_dot);
+  poly.push_back(0.5 * xi_dot_dot);
+  poly.push_back(soln(0));
+  poly.push_back(soln(1));
+  poly.push_back(0.0);  // use the quintic solver with alpha_5 = 0.0
+  return poly;
+}
+
 int main() {
   uWS::Hub h;
 
@@ -441,31 +616,29 @@ int main() {
                       double end_path_s = j[1]["end_path_s"];
                       double end_path_d = j[1]["end_path_d"];
 
+                      if (car_speed > 50.0) {
+                        std::cout << "simulator speed violation speed=" << car_speed << std::endl;
+                      }
+                      if (lane_change_state == false) {
+                        double tmp = car_d;
+                        while (tmp >= 4.0) {
+                          tmp -= 4.0;
+                        }
+                        if ((tmp < 1.0) || (tmp > 3.0)) {
+                          std::cout << "simulator lane violation d=" << car_d << std::endl;
+                        }
+                      }
+                      
                       // Sensor Fusion Data, a list of all other cars on the same side of the road.
                       //  Format:  [id,x,y,vx,vy,s,d]
                       auto sensor_fusion = j[1]["sensor_fusion"];
 
-                      //std::cout << "sensor_fusion: " << sensor_fusion << std::endl;
-                      for (int i=0; i<sensor_fusion.size(); i++) {
-                        int id = sensor_fusion[i][0];
-                        double obstacle_d = sensor_fusion[i][6];
-                        int lane = obstacle_d / 4.0;
-                        double obstacle_s = sensor_fusion[i][5];
-                        double obstacle_vx = sensor_fusion[i][3];
-                        double obstacle_vy = sensor_fusion[i][4];
-                        double obstacle_v = sqrt(pow(obstacle_vx,2) + pow(obstacle_vy,2));
-                        auto it = vehicles.find(id);
-                        if (it == vehicles.end()) {
-                          Vehicle v(id, lane, obstacle_s, obstacle_d, obstacle_v);
-                          it = vehicles.insert(std::pair<int, Vehicle> (id, v)).first;
-                        } else {
-                          it->second.set_lane(lane);
-                          it->second.set_s(obstacle_s);
-                          it->second.set_d(obstacle_d);
-                          it->second.set_velocity(obstacle_v);
-                        }
-                      }
-
+                      // Either complete a lane change or look for someone to follow
+                      int target_vehicle = -1;
+                      if (lane_change_state == false) {
+                        target_vehicle = vehicle_in_front(sensor_fusion, car_s, car_lane, vehicles);
+                      } // else keep the parameters established when we decided to change lanes
+                      
                       // check for a car in front of me to follow
                       //   find any vehicle in my lane (assume obstacle vehicles don't drive on the lines)
                       //   sort by closest distance
@@ -476,109 +649,12 @@ int main() {
                       double car_a = 0.0;
                       double car_vd = 0.0;
                       double car_ad = 0.0;
-                      int target_vehicle = -1;
-                      double min_dist = 1e6;
-                      double min_velocity = 0.0;
-                      int min_id = -1;
                       
-                      // Either complete a lane change or look for someone to follow
-                      if (lane_change_state == false) {
-                        for (auto it=vehicles.begin(); it!=vehicles.end(); it++) {
-                          if (it->second.uses_lane(car_lane)) {
-                            double dist = it->second.get_s() - car_s;
-                            if (dist >= 0 && dist < min_dist) {
-                              min_dist = dist;
-                              min_id = it->first;
-                              min_velocity = it->second.get_velocity();
-                            }
-                          }
-                        }
-                        if (min_id >= 0 && min_dist < 50.0) {
-                          auto it = vehicles.find(min_id);
-                          assert (it != vehicles.end());
-                          // std::cout << "LEADER id " << min_id << " distance " << min_dist << "m velocity "
-                          //           << it->second.get_velocity() << "m/s" << std::endl;
-                          target_vehicle = min_id;
-                        }
-                      } else {
-                        // keep the parameters established when we decided to change lanes
-                      }
                       if (target_vehicle >= 0) {
-                        // following someone slower:  see if we can drive faster by passing in a neighboring lane
-                        bool try_lane[3] = {car_lane == 1, car_lane == 2 || car_lane == 0, car_lane == 1};
-                        bool block_lane[3] = {false, false, false};
-                        double lane_vmax[3] = {maximum_speed, maximum_speed, maximum_speed};
-                        for (auto it=vehicles.begin(); it!=vehicles.end(); it++) {
-                          for (int veh_lane = 0; veh_lane < 3; veh_lane++) {
-                            if (it->second.uses_lane(veh_lane)) {
-                              if (veh_lane >= 0 && veh_lane < 3 && try_lane[veh_lane]) {
-                                double s0 = it->second.get_s();
-                                double s1;
-                                if (it->second.get_acceleration() >= 0.0) {
-                                  // conservatively assume acceleration will continue and don't cut in front
-                                  s1 = get_map_s(s0 + (T * it->second.get_velocity())
-                                                 + (0.5 * it->second.get_acceleration() * pow(T,2)));
-                                } else {
-                                  // do not project braking as it typically does not apply over the window
-                                  s1 = get_map_s(s0 + (T * it->second.get_velocity()));
-                                }
-                                // block the lane if a car is within buffer distance in front or behind
-                                double dist = abs(car_s - s0);
-                                bool ahead = (car_s > s0);
-                                double car_s1 = get_map_s(car_s + (car_v * T) + (0.5 * car_a * pow(T,2)));
-                                if ((ahead && (dist < 5.0)) || (!ahead && (dist < 10.0))) {
-                                  block_lane[veh_lane] = true;
-                                  // std::cout << "veh " << it->first << " s=" << s0 << " car_s=" << car_s <<
-                                  //   " blocks lane " << veh_lane << " (1)" << std::endl;
-                                } else if (!ahead && ((s1 - car_s1) < 20.0)) {
-                                  block_lane[veh_lane] = true;
-                                  // std::cout << "veh " << it->first << " s=" << s0 << "," << s1 << " car_s1=" << car_s1 <<
-                                  //   " blocks lane " << veh_lane << " (1.5)" << std::endl;
-                                } else {
-                                  // block the lane if a car will cross our position at velocity
-                                  //   - also ignore a lane with a slower car in front
-                                  if (s0 < car_s) {
-                                    double car_proj = get_map_s(car_s + (car_v * T) + (0.5 * car_a * pow(T,2)));
-                                    if (s1 > car_proj) {
-                                      block_lane[veh_lane] = true;
-                                      // std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (2)" << std::endl;
-                                    } else if (abs(car_proj - s1) < 5.0) {
-                                      // vehicle will be too close at current velocity
-                                      block_lane[veh_lane] = true;
-                                    }
-                                  } else {
-                                    if (dist < 50.0 && car_v > it->second.get_velocity()) {
-                                      block_lane[veh_lane] = true;
-                                      // std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (3)" << std::endl;
-                                    } else {
-                                      if (dist < 50.0) {
-                                        lane_vmax[veh_lane] = it->second.get_velocity();
-                                      }
-                                    }
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        }
-                        int max_lane = -1;
-                        double max_v = 0.0;
-                        for (int i=0; i<3; i++) {
-                          if (try_lane[i] && !block_lane[i]) {
-                            max_lane = i;
-                            max_v = lane_vmax[i];
-                          }
-                        }
-                        if (max_lane >= 0) {
-                          // std::cout << "we can move into lane " << max_lane << " v=" << max_v << std::endl;
-                          lane_change_state = true;
-                          lane_change_lane = max_lane;
-                          lane_change_speed = max_v;
-                          double max_lane_change_speed = 0.9 * (mph_to_mps(50.0));  // account for curvature and d component
-                          if (lane_change_speed > max_lane_change_speed) {
-                            lane_change_speed = max_lane_change_speed;
-                          }
-                        }
+                        auto r = change_lanes(car_s, car_v, car_a, car_lane, T, maximum_speed, vehicles);
+                        lane_change_state = std::get<0>(r);
+                        lane_change_lane = std::get<1>(r);
+                        lane_change_speed = std::get<2>(r);
                       }
                       
                       json msgJson;
@@ -656,10 +732,6 @@ int main() {
                       bool searching = true;
                       int search_cnt = 0;
                       while (searching) {
-                      
-                        // Using the quintic polynomial solver from Trajectory Generation
-                        //   Or a quadric alternative to get the car moving suggested in the Werling paper
-
                         x_vals_raw.clear();
                         y_vals_raw.clear();
                         s_vals_raw.clear();
@@ -736,51 +808,15 @@ int main() {
                           }
                         }
                         // quintic solution for d
-                        Eigen::MatrixXf m(3,3);
-                        m << pow(T,3), pow(T,4), pow(T,5),
-                          3.0 * pow(T,2), 4.0 * pow(T,3), 5.0 * pow(T,4),
-                          6.0 * T, 12.0 * pow(T,2), 20.0 * pow(T,3);
-                        Eigen::MatrixXf m_inv = m.inverse();
-                        Eigen::Vector3f v;
-                        v << (df - (di + (di_dot * T) + (0.5 * di_dot_dot * pow(T,2)))),
-                          (df_dot - (di_dot + (di_dot_dot * T))),
-                          (df_dot_dot - di_dot_dot);
-                        Eigen::Vector3f soln = m_inv * v;
-                        d_poly.push_back(di);
-                        d_poly.push_back(di_dot);
-                        d_poly.push_back(0.5 * di_dot_dot);
-                        d_poly.push_back(soln(0));
-                        d_poly.push_back(soln(1));
-                        d_poly.push_back(soln(2));
-                      
+                        d_poly = get_trajectory_quintic(di, di_dot, di_dot_dot, df, df_dot, df_dot_dot, T);
+                                              
+                        // Using the quintic polynomial solver from Trajectory Generation
+                        //   Or a quadric alternative for velocity only as suggested in the Werling paper
+
                         if (use_quintic) {
-                          Eigen::Vector3f v;
-                          v << (sf - (si + (si_dot * T) + (0.5 * si_dot_dot * pow(T,2)))),
-                            (sf_dot - (si_dot + (si_dot_dot * T))),
-                            (sf_dot_dot - si_dot_dot);
-                          Eigen::Vector3f soln = m_inv * v;
-                          s_poly.push_back(si);
-                          s_poly.push_back(si_dot);
-                          s_poly.push_back(0.5 * si_dot_dot);
-                          s_poly.push_back(soln(0));
-                          s_poly.push_back(soln(1));
-                          s_poly.push_back(soln(2));
+                          s_poly = get_trajectory_quintic(si, si_dot, si_dot_dot, sf, sf_dot, sf_dot_dot, T);
                         } else {
-                          // quadric 2 eqn with no target sf
-                          Eigen::MatrixXf m2(2,2);
-                          m2 << 3.0 * pow(T,2), 4.0 * pow(T,3),
-                            6.0 * T, 12.0 * pow(T,2);
-                          Eigen::MatrixXf m2_inv = m2.inverse();
-                          Eigen::Vector2f v2;
-                          v2 << sf_dot - (si_dot + si_dot_dot * T),
-                            sf_dot_dot - si_dot_dot;
-                          Eigen::Vector2f soln = m2_inv * v2;
-                          s_poly.push_back(si);
-                          s_poly.push_back(si_dot);
-                          s_poly.push_back(0.5 * si_dot_dot);
-                          s_poly.push_back(soln(0));
-                          s_poly.push_back(soln(1));
-                          s_poly.push_back(0.0);  // use the quintic solver with alpha_5 = 0.0                        
+                          s_poly = get_trajectory_quadric(si, si_dot, si_dot_dot, sf_dot, sf_dot_dot, T);
                         }
 
                         //bool ok = check_path(s_poly, d_poly, sx, sy, sdx, sdy);
