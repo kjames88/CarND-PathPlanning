@@ -389,6 +389,7 @@ change_lanes(double car_s, double car_v, double car_a, int car_lane, double T,
   bool try_lane[3] = {car_lane == 1, car_lane == 2 || car_lane == 0, car_lane == 1};
   bool block_lane[3] = {false, false, false};
   double lane_vmax[3] = {maximum_speed, maximum_speed, maximum_speed};
+  double lane_dmin[3] = {1000.0, 1000.0, 1000.0};
   for (auto it=vehicles.begin(); it!=vehicles.end(); it++) {
     for (int veh_lane = 0; veh_lane < 3; veh_lane++) {
       if (it->second.uses_lane(veh_lane)) {
@@ -432,6 +433,7 @@ change_lanes(double car_s, double car_v, double car_a, int car_lane, double T,
                 block_lane[veh_lane] = true;
                 // std::cout << "veh " << it->first << " blocks lane " << veh_lane << " (3)" << std::endl;
               } else {
+                lane_dmin[veh_lane] = dist;
                 if (dist < 50.0) {
                   lane_vmax[veh_lane] = it->second.get_velocity();
                 }
@@ -444,10 +446,15 @@ change_lanes(double car_s, double car_v, double car_a, int car_lane, double T,
   }
   int max_lane = -1;
   double max_v = 0.0;
+  double max_d = 0.0;
   for (int i=0; i<3; i++) {
     if (try_lane[i] && !block_lane[i]) {
-      max_lane = i;
-      max_v = lane_vmax[i];
+      if (lane_vmax[i] > max_v ||
+          ((lane_vmax[i] == max_v) && (lane_dmin[i] > max_d))) {
+        max_lane = i;
+        max_v = lane_vmax[i];
+        max_d = lane_dmin[i];
+      }
     }
   }
   if (max_lane >= 0) {
@@ -519,7 +526,7 @@ int main() {
   vector<double> map_waypoints_dy;
 
   // Waypoint map to read from
-  string map_file_ = "../data/highway_map.csv";
+  string map_file_ = "../data/highway_map_bosch1.csv";
 
   ifstream in_map_(map_file_.c_str(), ifstream::in);
 
@@ -733,7 +740,7 @@ int main() {
                           sf_dot = lane_change_speed;
                           sf_dot_dot = 0.0;
                           // offset to left side of lane due to lane violations on center (see README.md)
-                          df = ((double) lane_change_lane * 4.0) + 1.5; //2.0;
+                          df = ((double) lane_change_lane * 4.0) + 2.0;
                           df_dot = 0.0;
                           df_dot_dot = 0.0;
 
@@ -743,7 +750,7 @@ int main() {
                           }
                         } else {
                           // offset to left side of lane due to lane violations on center (see README.md)
-                          df = ((double) car_lane * 4.0) + 1.5; //2.0;
+                          df = ((double) car_lane * 4.0) + 2.0;
                           df_dot = 0.0;
                           df_dot_dot = 0.0;
                           
