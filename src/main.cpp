@@ -334,6 +334,23 @@ bool check_path(std::vector<double> next_x, std::vector<double> next_y) {
   return !fail;
 }
 
+// adjust the distance scale to reduce actual speed
+std::vector<double> scale_path(std::vector<double> next_s, double scale) {
+  assert(scale < 1.0);
+  std::vector<double> new_s;
+  new_s.push_back(next_s[0]);
+  double s_q = new_s[0];
+  for (int i=1; i<next_s.size(); i++) {
+    double s = next_s[i];
+    double ds = s - s_q;
+    s_q = s;  // full scale
+    ds *= scale;
+    s = new_s.back() + ds;
+    new_s.push_back(s);
+  }
+  return new_s;
+}
+
 int vehicle_in_front(nlohmann::basic_json<>& sensor_fusion, double car_s,
                      int car_lane, std::map<int, Vehicle>& vehicles) {
   int veh = -1;
@@ -638,7 +655,7 @@ int main() {
                       //   sort by closest distance
                       double T = 3.0;
                       assert(max_ratio >= 1.0);
-                      double maximum_speed = mph_to_mps(48.5 / max_ratio);
+                      double maximum_speed = mph_to_mps(49.0 / max_ratio);
                       double car_v = mph_to_mps(car_speed);
                       double car_a = 0.0;
                       double car_vd = 0.0;
@@ -795,7 +812,6 @@ int main() {
                             double target_speed = maximum_speed + delta_s_dot;
                             target_speed = (target_speed > maximum_speed) ? maximum_speed : target_speed;
                             sf_dot = target_speed;
-                            sf_dot += delta_s_dot;
                             sf_dot_dot = 0.0;
                           }
                         }
@@ -865,16 +881,32 @@ int main() {
                         if (ok) {
                           searching = false;
                         } else {
-                          // try an easier trajectory
-                          search_cnt++;
-                          std::cout << "max_ratio=" << max_ratio << " si=" << si << " si_dot=" << si_dot
-                                    << " si_dot_dot=" << si_dot_dot << " sf=" << sf
-                                    << " sf_dot=" << sf_dot << " sf_dot_dot=" << sf_dot_dot
-                                    << " search_cnt=" << search_cnt << " have_target "
-                                    << follow_target_vehicle << " lane_change " << lane_change_state << std::endl;
-                          if (search_cnt >= 5) {
-                            searching = false;
+                          auto new_s = scale_path(s_vals_raw, 0.98);
+                          x_vals_raw.clear();
+                          y_vals_raw.clear();
+                          s_vals_raw.clear();
+                          for (int sidx=0; sidx<new_s.size(); sidx++) {
+                            double s = new_s[sidx];
+                            double d = d_vals_raw[sidx];
+                            auto dbl_vec = getXY(s, d, sx, sy, sdx, sdy);
+                            double x = dbl_vec[0];
+                            double y = dbl_vec[1];
+                            x_vals_raw.push_back(x);
+                            y_vals_raw.push_back(y);
+                            s_vals_raw.push_back(s);
                           }
+                          check_path(x_vals_raw, y_vals_raw);
+                          searching = false;
+                          // // try an easier trajectory
+                          // search_cnt++;
+                          // std::cout << "max_ratio=" << max_ratio << " si=" << si << " si_dot=" << si_dot
+                          //           << " si_dot_dot=" << si_dot_dot << " sf=" << sf
+                          //           << " sf_dot=" << sf_dot << " sf_dot_dot=" << sf_dot_dot
+                          //           << " search_cnt=" << search_cnt << " have_target "
+                          //           << follow_target_vehicle << " lane_change " << lane_change_state << std::endl;
+                          // if (search_cnt >= 5) {
+                          //   searching = false;
+                          // }
                         }
 
                       }                      
